@@ -63,7 +63,7 @@ Real output (`lsof` lists a process's open files; `-d 0,1,2` selects the first t
 
 ```text
 COMMAND   PID            USER   FD   TYPE DEVICE SIZE/OFF      NODE NAME
-zsh     23844 sumitsrivastava    0r   CHR    3,2      0t0       336 /dev/null
+zsh     23844 <user>             0r   CHR    3,2      0t0       336 /dev/null
 ```
 
 Every TCP connection is a **socket**, and every socket is one file descriptor in each program that holds an end of it. A server with 1,000 open client connections therefore holds 1,000 fds, plus the few it needs for itself (its listening socket, its log files, the Java runtime's files). The client program holds 1,000 more on its side. This is why the README says each of the two processes needs about 1,100.
