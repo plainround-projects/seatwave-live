@@ -1,0 +1,10 @@
+# gitleaks settings for this repository: the default rules, plus one allow-listed string.
+# "dGhlIHNhbXBsZSBub25jZQ==" is the sample Sec-WebSocket-Key that RFC 6455 itself prints (base64 of
+# "the sample nonce"); the tests and the slow-consumer tool use it because its accept value is
+# published too. It is public test data, not a secret.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "RFC 6455's published sample Sec-WebSocket-Key"
+regexes = ['''dGhlIHNhbXBsZSBub25jZQ==''']

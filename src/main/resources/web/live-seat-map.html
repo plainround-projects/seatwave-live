@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SeatWave live seat map</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+    #map { display: grid; grid-template-columns: repeat(50, 8px); gap: 1px; }
+    #map span { width: 8px; height: 8px; background: #2e7d32; }
+    #map span.h { background: #f9a825; }
+    #map span.s { background: #9e9e9e; }
+    .status { margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>SeatWave live seat map</h1>
+  <p class="status">Method:
+    <select id="method" aria-label="Delivery method">
+      <option value="sse">Server-sent events (EventSource)</option>
+      <option value="websocket">WebSocket</option>
+    </select>
+    <span id="state" role="status">connecting</span>
+  </p>
+  <p class="status">Section A, seats 1 to 1,000. Green is available, amber held, grey sold.</p>
+  <div id="map" aria-label="Seats of section A"></div>
+  <script src="/live-seat-map.js"></script>
+</body>
+</html>

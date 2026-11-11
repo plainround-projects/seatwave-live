@@ -1,0 +1,35 @@
+# Optional: the build and the comparison on the target JDK (Eclipse Temurin 25.0.5) in a container,
+# for readers whose machine has another JDK. Nothing in the project needs a container: the feed,
+# the WebSocket server and every client run in plain JVMs on 127.0.0.1. The tag and its digest were
+# checked on Docker Hub on 11 November 2026 (eclipse-temurin 25.0.5_8-jdk-noble, updated
+# 1 November 2026). The project folder is mounted so the build writes build/ as usual; Gradle's
+# downloads are kept in a named volume. Inside the container every server still binds to its own
+# loopback address, so nothing is published to the host.
+# Run them with: docker compose run --rm check   and   docker compose run --rm compare
+services:
+  check:
+    image: eclipse-temurin:25.0.5_8-jdk-noble@sha256:95e350ad1eb738f943e141640f7e3d797e483359a3b33c3864255bfd1ad71f8a
+    working_dir: /work
+    command: ["./gradlew", "--no-daemon", "clean", "check"]
+    volumes:
+      - .:/work
+      - gradle-home:/root/.gradle
+    security_opt:
+      - no-new-privileges:true
+  compare:
+    image: eclipse-temurin:25.0.5_8-jdk-noble@sha256:95e350ad1eb738f943e141640f7e3d797e483359a3b33c3864255bfd1ad71f8a
+    working_dir: /work
+    command: ["./gradlew", "--no-daemon", "-q", "compare", "--args=config/compare.properties"]
+    volumes:
+      - .:/work
+      - gradle-home:/root/.gradle
+    # 1,000 clients and 1,000 server connections need about 2,100 descriptors per process; this
+    # raises the container's own limit only, not the host's.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  gradle-home:
