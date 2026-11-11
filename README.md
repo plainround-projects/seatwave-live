@@ -240,6 +240,10 @@ seatwave-live/
 
 A `tech/` folder of beginner notes on every technology used here is added in a separate step, after the code is final.
 
+## Technology notes
+
+The `tech/` folder explains every technology this repository uses, from zero: Java, concurrency in the feed, the three real-time protocols, measuring a server, Gradle and its wrapper scripts, the version catalog, dependency locking, the formatter, the coverage tool, the secret scanner, the test libraries, the web page and logging, properties files, Docker Compose, EditorConfig and Git. Eight more files walk through the main code and the tests line by line. Start at `tech/README.md`, which gives a reading order.
+
 ## What is simplified for teaching
 
 - The seat store is in memory, under one lock, with Module 1's rules; production keeps the rules in the database and feeds the publisher from it (Module 27).
