@@ -15,7 +15,7 @@ Tests are the requirements here, so they should read like requirements. `assertT
 | `gradle/libs.versions.toml` | `assertj = "3.27.7"` and `assertj-core`. |
 | `build.gradle.kts` | `testImplementation(libs.assertj.core)`. |
 | `gradle.lockfile` | Locks `assertj-core` and its dependency `byte-buddy` 1.18.3 (`dependency-locking.md`). |
-| `src/test/java/**` | `assertThat` is used in all 18 test classes; `assertThatThrownBy` in 6 classes (`FrameCodecTest`, `FeedPositionTest`, `SeatLayoutTest`, `ClientSeatMapTest`, `ReplayBufferTest`, `BackoffTest`). There are 207 `assertThat(` calls and 21 `assertThatThrownBy(` calls in all. |
+| `src/test/java/**` | `assertThat` is used in all 20 test classes; `assertThatThrownBy` in 6 classes (`FrameCodecTest`, `FeedPositionTest`, `SeatLayoutTest`, `ClientSeatMapTest`, `ReplayBufferTest`, `BackoffTest`). There are 231 `assertThat(` calls and 24 `assertThatThrownBy(` calls in all. |
 
 ## How it works underneath
 
@@ -70,7 +70,7 @@ I changed the second expectation to `"aaaaa"` in a scratch copy and ran the test
               "\"seat\":\"A-1\"");
 ```
 
-`contains` on a `String` checks that the text includes every given piece (the method takes any number of them). A failing `contains` prints the whole text and the missing piece. Here the first `assertThat` reads the reply headers the server sent for an event stream and expects the status line `HTTP/1.1 200`, the content type `text/event-stream` and `no-store` caching. The second reads one event and expects its `id:` line to be the next position, its `event:` line to say `seat`, and its `data:` line to be the JSON of a seat change for seat `A-1`. `startsWith` (20 calls), `endsWith` (4), `doesNotContain` (1) and `doesNotEndWith` (1) are the neighbors.
+`contains` on a `String` checks that the text includes every given piece (the method takes any number of them). A failing `contains` prints the whole text and the missing piece. Here the first `assertThat` reads the reply headers the server sent for an event stream and expects the status line `HTTP/1.1 200`, the content type `text/event-stream` and `no-store` caching. The second reads one event and expects its `id:` line to be the next position, its `event:` line to say `seat`, and its `data:` line to be the JSON of a seat change for seat `A-1`. `startsWith` (20 calls), `endsWith` (5), `doesNotContain` (4) and `doesNotEndWith` (1) are the neighbors.
 
 ### Exceptions: `assertThatThrownBy`, `isInstanceOf`, `hasMessageContaining`
 
@@ -97,7 +97,7 @@ I changed the second expectation to `"aaaaa"` in a scratch copy and ran the test
         .hasMessageContaining("fragmented");
 ```
 
-`hasMessageContaining("masked")` (5 calls in all) adds a check on the exception's message. Two different refusals throw the same type, `ProtocolViolation`, and the message tells them apart: this test proves that an unmasked frame is refused for being unmasked and a fragmented frame for being fragmented, not for some other reason.
+`hasMessageContaining("masked")` (6 calls in all) adds a check on the exception's message. Two different refusals throw the same type, `ProtocolViolation`, and the message tells them apart: this test proves that an unmasked frame is refused for being unmasked and a fragmented frame for being fragmented, not for some other reason.
 
 ### Collections: `hasSize`, `extracting`, `containsExactly`, `containsExactlyInAnyOrder`, `anySatisfy`
 
@@ -144,7 +144,7 @@ I changed the second expectation to `"aaaaa"` in a scratch copy and ran the test
         .containsOnly("10");
 ```
 
-- `assertThat(lines).anySatisfy(line -> assertThat(line).startsWith("long-polling med    10"))` (7 calls of `anySatisfy` in all) expects at least one element to satisfy the inner assertion. The report has many lines; the test names the one it cares about.
+- `assertThat(lines).anySatisfy(line -> assertThat(line).startsWith("long-polling med    10"))` (8 calls of `anySatisfy` in all) expects at least one element to satisfy the inner assertion. The report has many lines; the test names the one it cares about.
 - The long statement builds a stream of the lines that contain ` med `, cuts the last seven characters of each, trims them, and `containsOnly("10")` (1 call) demands that the result holds nothing but `"10"`: in every method's median line, the last column, the number of clients whose map equals the store's, is 10.
 - `hasSize(...)` (11 calls) is the usual check on a size, for example `hasSize(4)` on the CSV file's lines.
 
@@ -159,7 +159,7 @@ I changed the second expectation to `"aaaaa"` in a scratch copy and ran the test
         });
 ```
 
-`held.discardError()` turns a `Result` into an `Optional` of the success value. `hasValueSatisfying(change -> { ... })` (4 calls) checks that the `Optional` holds a value and then runs the inner assertions on it. In the same file the three inner lines check the new state, the position's sequence number and the timestamp, which must equal the fake clock's time. `SeatLayoutTest` uses the short form: `assertThat(arena.indexOf("B-7")).contains(1_006)` on an `Optional<Integer>` checks the content, `isEmpty()` (12 calls) checks that nothing is there, and `isPresent()` (4 calls) checks that something is.
+`held.discardError()` turns a `Result` into an `Optional` of the success value. `hasValueSatisfying(change -> { ... })` (4 calls) checks that the `Optional` holds a value and then runs the inner assertions on it. In the same file the three inner lines check the new state, the position's sequence number and the timestamp, which must equal the fake clock's time. `SeatLayoutTest` uses the short form: `assertThat(arena.indexOf("B-7")).contains(1_006)` on an `Optional<Integer>` checks the content, `isEmpty()` (13 calls) checks that nothing is there, and `isPresent()` (4 calls) checks that something is.
 
 ### Numbers and flags: `isCloseTo`, `isBetween`, `isZero`, `isPositive`, `isGreaterThan`
 
@@ -172,7 +172,7 @@ I changed the second expectation to `"aaaaa"` in a scratch copy and ran the test
 
 - `isEqualTo(40_000.0)` compares a `double` exactly; this works because 40,000 is a whole number, which a `double` stores without any rounding.
 - `isCloseTo(0.920, within(0.001))` (2 calls) accepts any value from 0.919 to 0.921. A computed share cannot be compared with `isEqualTo` after rounding; `within` states the tolerance in the open.
-- `isBetween(300.0, 500.0)` in `BackoffTest` (2 calls) does the same with a range. `isZero()` (3), `isPositive()` (1), `isGreaterThan(...)` (2) and `isGreaterThanOrEqualTo(...)` (1) are the plain comparisons, and `isTrue()` (2) and `isFalse()` (2) check flags.
+- `isBetween(300.0, 500.0)` in `BackoffTest` (2 calls) does the same with a range. `isZero()` (3), `isPositive()` (1), `isGreaterThan(...)` (2) and `isGreaterThanOrEqualTo(...)` (1) are the plain comparisons, and `isTrue()` (4) and `isFalse()` (5) check flags.
 
 ### Arrays, files and navigation
 
@@ -225,7 +225,7 @@ All ran in a scratch copy on 11 November 2026.
 grep -rhoE "assertThat\(" src/test | wc -l
 ```
 
-   Output: `207`.
+   Output: `231`.
 
 2. Count the `assertThatThrownBy(` calls:
 
@@ -233,7 +233,7 @@ grep -rhoE "assertThat\(" src/test | wc -l
 grep -rhoE "assertThatThrownBy\(" src/test | wc -l
 ```
 
-   Output: `21`.
+   Output: `24`.
 
 3. See which assertion methods are used and how often:
 
@@ -241,7 +241,7 @@ grep -rhoE "assertThatThrownBy\(" src/test | wc -l
 grep -rhoE "\.(isEqualTo|contains|isInstanceOf|startsWith|isEmpty|hasSize|anySatisfy)\(" src/test | sort | uniq -c | sort -rn
 ```
 
-   Output: `89 .isEqualTo(`, `39 .contains(`, `30 .isInstanceOf(`, `20 .startsWith(`, `12 .isEmpty(`, `11 .hasSize(` and `7 .anySatisfy(`.
+   Output: `97 .isEqualTo(`, `43 .contains(`, `31 .isInstanceOf(`, `20 .startsWith(`, `13 .isEmpty(`, `11 .hasSize(` and `8 .anySatisfy(`.
 
 4. Watch a failure message. In a scratch copy, change `isEqualTo("ahaaa")` in `ClientSeatMapTest.appliesTheNextChange` to `isEqualTo("aaaaa")` and run:
 

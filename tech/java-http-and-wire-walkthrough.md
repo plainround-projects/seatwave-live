@@ -1189,12 +1189,18 @@ import java.util.Set;
  * change after it (up to one batch), or with an instruction to reload.
  *
  * <p>A held request costs a parked virtual thread and an open connection, and counts against the
- * connection limit like a push connection. Thread-safe: no state of its own.
+ * connection limit like a push connection. A limit of long polling on this server: a client that
+ * goes away while its request is held is noticed only when the reply is written, up to one hold
+ * later, because the JDK's HTTP server tells a handler nothing about the connection until it
+ * writes. Until then the request keeps its thread and its place under the limit. Thread-safe: no
+ * state of its own.
  */
 final class LongPollRoute {
 ```
 
 A **long poll** is a request the server holds until it has news. The Javadoc defines this route: `GET /v1/events/1/seat-changes?after=<position>`. A held request costs a parked virtual thread and an open connection, and it counts against the connection limit like a push connection.
+
+The Javadoc also states a limit. If the client goes away while its request is held (the browser tab is closed, the phone loses its network), this server finds out only when it writes the reply, which can be up to one hold later (25 seconds with `config/serve.properties`). The JDK's HTTP server gives a handler no way to notice a closed connection before it writes: `HttpExchange` has a request body to read and a response to write, but no event for "the other side hung up". Until the reply, the abandoned request keeps its virtual thread and its place under the connection limit. That is a limit of long polling on this server, not a defect: the hold is bounded, so the place is always freed, and a server that watched every held socket for a close would need its own network layer. The README lists it under "What is simplified for teaching".
 
 ```java
   private final SeatFeed feed;
@@ -1561,10 +1567,13 @@ The Javadoc says it all: the JDK's own server, bound to 127.0.0.1 only, one virt
   private static final Map<String, String> PAGES =
       Map.of(
           "/", "web/live-seat-map.html",
+          "/live-seat-map.css", "web/live-seat-map.css",
           "/live-seat-map.js", "web/live-seat-map.js");
+  // The page names the WebSocket origin with this mark; the server writes the real one in.
+  private static final String WEBSOCKET_ORIGIN_MARK = "@websocket-origin@";
 ```
 
-`EVENT_PATH` matches `/v1/events/<1 to 9 digits>/seat-map`, `/seat-changes` or `/seat-changes/stream`. `STOP_DELAY_SECONDS = 0` stops the server without waiting. `PAGES` is a map from a URL path to a file inside the program's resources: `/` is the page and `/live-seat-map.js` its script.
+`EVENT_PATH` matches `/v1/events/<1 to 9 digits>/seat-map`, `/seat-changes` or `/seat-changes/stream`. `STOP_DELAY_SECONDS = 0` stops the server without waiting. `PAGES` is a map from a URL path to a file inside the program's resources: `/` is the page, `/live-seat-map.css` its style and `/live-seat-map.js` its script. `WEBSOCKET_ORIGIN_MARK` is the text `@websocket-origin@`, which the page file contains where the WebSocket address belongs; `page` below replaces it with the real address before it sends the page.
 
 ```java
   private final HttpServer server;
@@ -1574,6 +1583,7 @@ The Javadoc says it all: the JDK's own server, bound to 127.0.0.1 only, one virt
   private final LongPollRoute longPoll;
   private final EventStreamRoute eventStream;
   private final boolean adminEnabled;
+  private final String webSocketOrigin;
   private final String contentSecurityPolicy;
 
   private FeedHttpServer(HttpServer server, Parts parts, LiveSettings settings, int webSocketPort) {
@@ -1593,13 +1603,14 @@ Fields. The constructor is private; `start` is the way in.
         new EventStreamRoute(
             parts, replies, settings.timing().heartbeat(), settings.timing().retry());
     this.adminEnabled = settings.adminEnabled();
-    // The page may load only its own script and talk only to this feed and its WebSocket port.
-    this.contentSecurityPolicy =
-        "default-src 'self'; connect-src 'self' ws://127.0.0.1:" + webSocketPort;
+    this.webSocketOrigin = "ws://127.0.0.1:" + webSocketPort;
+    // The page may load only its own files (no inline style or script) and talk only to this feed
+    // and the one WebSocket origin it is told about.
+    this.contentSecurityPolicy = "default-src 'self'; connect-src 'self' " + webSocketOrigin;
   }
 ```
 
-`Executors.newVirtualThreadPerTaskExecutor()` makes an executor that starts a new virtual thread for each task. The comment says the connection limit, not the thread count, bounds the work. Then the replies, the two routes and the admin flag are built. The **Content-Security-Policy** is a header the page's response carries: `default-src 'self'; connect-src 'self' ws://127.0.0.1:<port>` tells the browser the page may load only from its own origin and may connect only to its own origin and the WebSocket port.
+`Executors.newVirtualThreadPerTaskExecutor()` makes an executor that starts a new virtual thread for each task. The comment says the connection limit, not the thread count, bounds the work. Then the replies, the two routes and the admin flag are built. `webSocketOrigin` is `ws://127.0.0.1:` followed by the WebSocket server's real port, the one it bound (with port 0 in the tests, a port the system chose). The **Content-Security-Policy** is a header the page's response carries: `default-src 'self'; connect-src 'self' ws://127.0.0.1:<port>` tells the browser the page may load only from its own origin and may connect only to its own origin and that one WebSocket origin. `default-src 'self'` also forbids inline style and inline script, which is why the page keeps both in files of their own (`web-page-and-logging.md`). In version 1.0.0 the page had an inline `<style>` block, the browser refused it, and the seat map had no size or color, so it was invisible.
 
 ```java
   /**
@@ -1733,13 +1744,24 @@ Plain paths: `/health` replies `ok`, `/metrics` the Prometheus text with content
       body = Objects.requireNonNull(in, resource).readAllBytes();
     }
     exchange.getResponseHeaders().set("Content-Security-Policy", contentSecurityPolicy);
-    String type =
-        resource.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8";
+    String type;
+    if (resource.endsWith(".js")) {
+      type = "text/javascript; charset=utf-8";
+    } else if (resource.endsWith(".css")) {
+      type = "text/css; charset=utf-8";
+    } else {
+      type = "text/html; charset=utf-8";
+      // The page learns the WebSocket port from the server, so it is right for any setting.
+      body =
+          new String(body, StandardCharsets.UTF_8)
+              .replace(WEBSOCKET_ORIGIN_MARK, webSocketOrigin)
+              .getBytes(StandardCharsets.UTF_8);
+    }
     replies.text(exchange, type, body);
   }
 ```
 
-`page` looks the path up in `PAGES`. No entry gives 404. Otherwise it reads the file from the classpath (`getResourceAsStream`), adds the Content-Security-Policy header, picks the content type by the file name's end, and sends it.
+`page` looks the path up in `PAGES`. No entry gives 404. Otherwise it reads the file from the classpath (`getResourceAsStream`), adds the Content-Security-Policy header and picks the content type by the file name's end: `text/javascript` for `.js`, `text/css` for `.css`, and `text/html` for the page. For the page only, it turns the bytes into text, replaces the mark `@websocket-origin@` with `webSocketOrigin`, and turns the text back into UTF-8 bytes. The page therefore learns the WebSocket port from the server that serves it, and the port it learns is exactly the one the policy allows. In version 1.0.0 the script had the port 8091 written into it, so with any other `websocket.port` setting the page tried the wrong port and its own policy blocked the connection.
 
 ```java
   // The lab's control routes: they exist only when admin.enabled=true, on 127.0.0.1, so the

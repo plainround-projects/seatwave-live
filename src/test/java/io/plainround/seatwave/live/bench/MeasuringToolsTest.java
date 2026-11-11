@@ -6,6 +6,11 @@ import io.plainround.seatwave.live.TestSettings;
 import io.plainround.seatwave.live.config.LiveSettings;
 import io.plainround.seatwave.live.config.SettingsReader;
 import io.plainround.seatwave.live.feed.DeliveryMethod;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -52,7 +57,7 @@ class MeasuringToolsTest {
 
   @Test
   void startsTheFeedInAProcessOfItsOwnAndReadsItsMemory() throws Exception {
-    Path file = Path.of("config/compare-server.properties");
+    Path file = serverSettingsOnFreePorts();
     LiveSettings settings =
         LiveSettings.from(new SettingsReader(SettingsReader.load(file)))
             .discardError()
@@ -60,8 +65,8 @@ class MeasuringToolsTest {
 
     try (ChildProcessServer server =
         ChildProcessServer.start(file, settings, 128, folder.resolve("server.log"))) {
-      assertThat(server.httpPort()).isEqualTo(8092);
-      assertThat(server.webSocketPort()).isEqualTo(8093);
+      assertThat(server.httpPort()).isEqualTo(settings.network().httpPort());
+      assertThat(server.webSocketPort()).isEqualTo(settings.network().websocketPort());
       assertThat(ProcessMemory.residentBytes(server.processId().orElseThrow()).orElseThrow())
           .isPositive();
     }
@@ -79,6 +84,11 @@ class MeasuringToolsTest {
                 .startsWith("queue overflows (client told to reload): ")
                 .doesNotEndWith(": 0"));
     assertThat(lines).anySatisfy(line -> assertThat(line).endsWith("3 of 3 match the store"));
+    // Whether the server has ended both slow connections in so short a run depends on how much the
+    // kernel buffers absorb, so only the presence of the check is asserted here.
+    assertThat(lines)
+        .anySatisfy(line ->
+            assertThat(line).matches("slow clients' connections ended by the server .*: (yes|no)"));
   }
 
   @Test
@@ -107,5 +117,26 @@ class MeasuringToolsTest {
     assertThat(lines.get(1)).startsWith("long-polling");
     assertThat(lines.get(3)).startsWith("websocket");
     assertThat(MachineLine.describe()).startsWith("Java 25");
+  }
+
+  // The comparison's node settings with two ports that are free right now, so the test does not
+  // depend on 8092 and 8093 being unused on this machine.
+  private Path serverSettingsOnFreePorts() throws IOException {
+    int httpPort = freePort();
+    int webSocketPort = freePort();
+    String settings =
+        Files.readString(Path.of("config/compare-server.properties"), StandardCharsets.UTF_8)
+            .replace("http.port=8092", "http.port=" + httpPort)
+            .replace("websocket.port=8093", "websocket.port=" + webSocketPort)
+            .replace("http://127.0.0.1:8092", "http://127.0.0.1:" + httpPort);
+    Path file = folder.resolve("compare-server.properties");
+    Files.writeString(file, settings, StandardCharsets.UTF_8);
+    return file;
+  }
+
+  private static int freePort() throws IOException {
+    try (ServerSocket probe = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+      return probe.getLocalPort();
+    }
   }
 }

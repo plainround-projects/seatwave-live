@@ -17,7 +17,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p><b>The invariant.</b> A client that names its last position receives every later change
  * exactly once, or is told to reload the seat map; never a silent gap. It holds because three
  * things happen under one lock: numbering a change and appending it to the buffer ({@link
- * #publish}); reading a catch-up from the buffer ({@link #changesAfter}); and, for a push
+ * #publish}); reading a catch-up from the buffer ({@link #awaitChangesAfter}); and, for a push
  * connection, reading its catch-up and registering it for live changes in the same step ({@link
  * #subscribe}). No change can fall between the catch-up and the live stream, and none can be in
  * both.
@@ -64,22 +64,6 @@ public final class SeatFeed {
     lock.lock();
     try {
       return buffer.position();
-    } finally {
-      lock.unlock();
-    }
-  }
-
-  /**
-   * The changes after a client's position, at once.
-   *
-   * @param known the client's position
-   * @return up to the batch size of changes after it, or a reload instruction
-   */
-  public Catchup changesAfter(FeedPosition known) {
-    Objects.requireNonNull(known, "known");
-    lock.lock();
-    try {
-      return buffer.after(known, maxBatch);
     } finally {
       lock.unlock();
     }
@@ -170,6 +154,12 @@ public final class SeatFeed {
    * @return how many writers were interrupted
    */
   public int disconnectStuckWriters(Duration writeTimeout) {
+    return disconnectStuckWriters(writeTimeout, System.nanoTime());
+  }
+
+  // The time of the check is a parameter, so whether a write counts as stuck depends only on the
+  // two readings of System.nanoTime, never on how long the check itself takes to run.
+  int disconnectStuckWriters(Duration writeTimeout, long nowNanos) {
     List<Subscriber> current;
     lock.lock();
     try {
@@ -177,7 +167,6 @@ public final class SeatFeed {
     } finally {
       lock.unlock();
     }
-    long nowNanos = System.nanoTime();
     int interrupted = 0;
     for (Subscriber subscriber : current) {
       if (subscriber.interruptIfStuck(nowNanos, writeTimeout)) {

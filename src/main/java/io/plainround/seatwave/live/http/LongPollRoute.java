@@ -21,7 +21,11 @@ import java.util.Set;
  * change after it (up to one batch), or with an instruction to reload.
  *
  * <p>A held request costs a parked virtual thread and an open connection, and counts against the
- * connection limit like a push connection. Thread-safe: no state of its own.
+ * connection limit like a push connection. A limit of long polling on this server: a client that
+ * goes away while its request is held is noticed only when the reply is written, up to one hold
+ * later, because the JDK's HTTP server tells a handler nothing about the connection until it
+ * writes. Until then the request keeps its thread and its place under the limit. Thread-safe: no
+ * state of its own.
  */
 final class LongPollRoute {
 

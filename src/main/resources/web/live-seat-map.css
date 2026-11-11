@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+#map { display: grid; grid-template-columns: repeat(50, 8px); gap: 1px; }
+#map span { width: 8px; height: 8px; background: #2e7d32; }
+#map span.h { background: #f9a825; }
+#map span.s { background: #9e9e9e; }
+.status { margin: 8px 0; }

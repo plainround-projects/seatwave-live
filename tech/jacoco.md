@@ -8,7 +8,7 @@ JaCoCo works with a **Java agent**: a small jar that the Java Virtual Machine (J
 
 ## Why this repository uses it
 
-The build has a measured floor: line coverage must be at least 0.80, and the build fails below it. That keeps the tests honest as the code grows. The README reports "Coverage was 90.3 percent of lines (2,266 of 2,509)", and a run in a scratch copy for these notes gave the same numbers.
+The build has a measured floor: line coverage must be at least 0.80, and the build fails below it. That keeps the tests honest as the code grows. The README reports "Coverage was 90.8 percent of lines (2,315 of 2,550)", and a run in a scratch copy for these notes gave the same numbers.
 
 ## Where it appears
 
@@ -91,20 +91,20 @@ tasks.check {
 
 `counter = "LINE"` picks the line counter. `minimum = "0.80".toBigDecimal()` is the lowest accepted ratio of covered lines to all lines. The comment above it names the untested remainder: the command-line entry points. `tasks.check { dependsOn(...) }` makes the rule part of `check`. When I raised the minimum to 0.95 in a scratch copy, the build failed with `Rule violated for bundle seatwave-live: lines covered ratio is 0.90, but expected minimum is 0.95`.
 
-### The real numbers (Temurin 25.0.2, 93 tests)
+### The real numbers (Temurin 25.0.2, 103 tests)
 
 I ran `./gradlew clean check` in a scratch copy and read `build/reports/jacoco/test/jacocoTestReport.xml` and the HTML report. The last row of the HTML table, "Total", reads:
 
 | Counter | Missed | Total | Covered |
 | --- | --- | --- | --- |
-| Instructions | 1,119 | 12,557 | 91 percent (11,438 covered) |
-| Branches | 193 | 727 | 73 percent (534 covered) |
-| Lines | 243 | 2,509 | 2,266 lines, 90.3 percent |
-| Methods | 25 | 473 | 448 |
+| Instructions | 1,079 | 12,740 | 91 percent (11,661 covered) |
+| Branches | 186 | 759 | 75 percent (573 covered) |
+| Lines | 235 | 2,550 | 2,315 lines, 90.8 percent |
+| Methods | 25 | 477 | 452 |
 | Classes | 4 | 102 | 98 |
-| Complexity | 193 | 845 | 652 |
+| Complexity | 186 | 865 | 679 |
 
-The rule needs 0.80 of 2,509 lines, which is 2,007.2, so at least 2,008 covered lines. The build has 2,266. **The margin is 258 lines.** The README's figures (93 tests, 90.3 percent, 2,266 of 2,509) match this run.
+The rule needs 0.80 of 2,550 lines, which is 2,040 covered lines. The build has 2,315. **The margin is 275 lines.** The README's figures (103 tests, 90.8 percent, 2,315 of 2,550) match this run.
 
 Per package, the missed lines (from the XML report, class by class):
 
@@ -112,16 +112,16 @@ Per package, the missed lines (from the XML report, class by class):
 | --- | --- | --- | --- |
 | `live` (the root package) | 22 | 63 | All 22 lines of `ServeCli` (the node that runs until its serve time ends). |
 | `config` | 10 | 114 | Three in the `Network` record of `LiveSettings`, two in `SettingsReader`, two in the `OnSale` record, and one each in the `Limits` record, the `Timing` record and `LiveSettings` itself. |
-| `feed` | 9 | 444 | Two each in `SeatChange`, `SeatMapSnapshot` and `OnSaleSimulator`, and one each in `SeatStore`, `Subscriber` and `ConnectionLimit`. |
+| `feed` | 9 | 446 | Two each in `SeatChange`, `SeatMapSnapshot` and `OnSaleSimulator`, and one each in `SeatStore`, `Subscriber` and `ConnectionLimit`. |
 | `wire` | 3 | 33 | Three in `FeedJson`. |
-| `http` | 9 | 282 | Four in `FeedHttpServer`, two each in `LongPollRoute` and `EventStreamRoute`, one in `Query`. |
-| `websocket` | 16 | 302 | Ten in `WebSocketSession`, three in `Handshake`, two in `FrameCodec`, one in `WebSocketServer`. |
-| `client` | 59 | 398 | `WebSocketConnection` 14 (and 5 more in its inner `Listener`), `EventStreamConnection` 11, `FeedClient` 10 (and 3 in its inner `Sink`), `LongPollConnection` 6, `ClientStats` 5, `SeatMapReader` 3, and one each in `FleetPlan` and `FeedEndpoints`. |
-| `bench` | 115 | 873 | `SlowConsumerCli` 19, `ComparisonCli` 18, `WireBytesCli` 17, `SseResumeCli` 13, `ChildProcessServer` 11, `PollingRatesCli` 11, `Comparison` 9, `FeedAdmin` 6, `ProcessMemory` 3, two each in `CompareSettings` and `PollingRates`, one each in `InProcessServer`, `LatencySummary`, `WireBytesProbe` and `SlowConsumer`. |
+| `http` | 9 | 290 | Four in `FeedHttpServer`, two each in `LongPollRoute` and `EventStreamRoute`, one in `Query`. |
+| `websocket` | 10 | 307 | Four in `WebSocketSession`, three in `Handshake`, two in `FrameCodec`, one in `WebSocketServer`. |
+| `client` | 53 | 406 | `WebSocketConnection` 14 (and 5 more in its inner `Listener`), `EventStreamConnection` 10, `FeedClient` 6 (and 3 in its inner `Sink`), `LongPollConnection` 6, `ClientStats` 5, `SeatMapReader` 2, and one each in `FleetPlan` and `FeedEndpoints`. |
+| `bench` | 119 | 891 | `SlowConsumerCli` 19, `ComparisonCli` 18, `WireBytesCli` 17, `SseResumeCli` 13, `ChildProcessServer` 11, `PollingRatesCli` 11, `Comparison` 9, `FeedAdmin` 6, `SlowConsumer` 6, `ProcessMemory` 3, two in `PollingRates`, one each in `InProcessServer`, `LatencySummary`, `WireBytesProbe` and `CompareSettings`. |
 
-The command-line entry points explain 100 of the 243 missed lines: `ServeCli` 22, `SlowConsumerCli` 19, `ComparisonCli` 18, `WireBytesCli` 17, `SseResumeCli` 13 and `PollingRatesCli` 11. `Classes` shows 4 missed of 102, and they are `ServeCli`, `SlowConsumerCli`, `WireBytesCli` and `SseResumeCli`, the four whose `main` method is all they have. `ComparisonCli` and `PollingRatesCli` are only partly missed because the tests call their `run` and `report` methods directly. `ServeCli` is a good example of what the report cannot see: one test (`startsTheFeedInAProcessOfItsOwnAndReadsItsMemory`) starts it, but in a child JVM that has no JaCoCo agent, so it shows 0 of 22 lines covered although it did run. The other 143 missed lines are spread over the classes in the table, mostly one to fourteen lines each; I did not read each one. The comparison test runs with `childProcess` set to `false`, so the lines of `Comparison`, `ChildProcessServer` and `ProcessMemory` that handle the separate process are among the missed ones.
+The command-line entry points explain 100 of the 235 missed lines: `ServeCli` 22, `SlowConsumerCli` 19, `ComparisonCli` 18, `WireBytesCli` 17, `SseResumeCli` 13 and `PollingRatesCli` 11. `Classes` shows 4 missed of 102, and they are `ServeCli`, `SlowConsumerCli`, `WireBytesCli` and `SseResumeCli`, the four whose `main` method is all they have. `ComparisonCli` and `PollingRatesCli` are only partly missed because the tests call their `run` and `report` methods directly. `ServeCli` is a good example of what the report cannot see: one test (`startsTheFeedInAProcessOfItsOwnAndReadsItsMemory`) starts it, but in a child JVM that has no JaCoCo agent, so it shows 0 of 22 lines covered although it did run. The other 135 missed lines are spread over the classes in the table, mostly one to fourteen lines each; I did not read each one. The comparison test runs with `childProcess` set to `false`, so the lines of `Comparison`, `ChildProcessServer` and `ProcessMemory` that handle the separate process are among the missed ones.
 
-The heart of the project is covered almost completely: the `feed` package misses 9 of 444 lines, the `websocket` package 16 of 302 and the `http` package 9 of 282.
+The heart of the project is covered almost completely: the `feed` package misses 9 of 446 lines, the `websocket` package 10 of 307 and the `http` package 9 of 290.
 
 ### Reading the report
 
@@ -137,7 +137,7 @@ All of these ran in a scratch copy on 11 November 2026. Timings differ on every 
 ./gradlew clean check
 ```
 
-   Expected: 93 `PASSED` lines, `> Task :jacocoTestCoverageVerification`, `BUILD SUCCESSFUL in 25s` and `10 actionable tasks: 10 executed`.
+   Expected: 103 `PASSED` lines, `> Task :jacocoTestCoverageVerification`, `BUILD SUCCESSFUL in 29s` and `10 actionable tasks: 10 executed`.
 
 2. Print the totals from the HTML report:
 
@@ -145,7 +145,7 @@ All of these ran in a scratch copy on 11 November 2026. Timings differ on every 
 grep -o '<tfoot>.*</tfoot>' build/reports/jacoco/test/html/index.html | sed 's/<[^>]*>/ /g'
 ```
 
-   Expected: `Total  1,119 of 12,557  91%  193 of 727  73%  193  845  243  2,509  25  473  4  102`.
+   Expected: `Total  1,079 of 12,740  91%  186 of 759  75%  186  865  235  2,550  25  477  4  102`.
 
 3. Print the total line counter from the XML report:
 
@@ -153,7 +153,7 @@ grep -o '<tfoot>.*</tfoot>' build/reports/jacoco/test/html/index.html | sed 's/<
 grep -o '<counter type="LINE"[^>]*>' build/reports/jacoco/test/jacocoTestReport.xml | tail -1
 ```
 
-   Expected: `<counter type="LINE" missed="243" covered="2266"/>`.
+   Expected: `<counter type="LINE" missed="235" covered="2315"/>`.
 
 4. Print the totals of the `bench` package:
 
@@ -161,7 +161,7 @@ grep -o '<counter type="LINE"[^>]*>' build/reports/jacoco/test/jacocoTestReport.
 grep -o '<tfoot>.*</tfoot>' build/reports/jacoco/test/html/io.plainround.seatwave.live.bench/index.html | sed 's/<[^>]*>/ /g'
 ```
 
-   Expected: `Total  606 of 4,913  87%  87 of 196  55%  80  269  115  873  12  171  3  30`. The `bench` package has 873 lines, 115 of them missed, and three missed classes (`SlowConsumerCli`, `WireBytesCli` and `SseResumeCli`; the fourth missed class of the whole project, `ServeCli`, is in the root package).
+   Expected: `Total  610 of 4,965  87%  87 of 202  56%  80  273  119  891  12  172  3  30`. The `bench` package has 891 lines, 119 of them missed, and three missed classes (`SlowConsumerCli`, `WireBytesCli` and `SseResumeCli`; the fourth missed class of the whole project, `ServeCli`, is in the root package).
 
 5. See the recording and the report folders:
 
@@ -179,7 +179,7 @@ ls build/jacoco build/reports/jacoco/test build/reports/jacoco/test/html
 - **Chasing 100 percent for `main` methods.** The build documents them as the untested remainder instead (here `ServeCli` and the five `*Cli` classes of the measuring tools).
 - **Running only `./gradlew test` and expecting the rule to be checked.** The rule runs in `jacocoTestCoverageVerification`, which `check` runs.
 - **Reading an old report.** The report is rewritten after each `test` run; run the tests first.
-- **Forgetting the margin.** There are 258 lines of headroom now, but every untested line uses some of it, so new code still needs tests in the same change.
+- **Forgetting the margin.** There are 275 lines of headroom now, but every untested line uses some of it, so new code still needs tests in the same change.
 - **Expecting a child process to be measured.** The agent is in the test JVM only. The feed that `compare` starts in its own JVM is not counted when the test starts it.
 - **Deleting a test to make a number look right.** The check then fails for the right reason.
 
@@ -187,9 +187,9 @@ ls build/jacoco build/reports/jacoco/test build/reports/jacoco/test/html
 
 1. *What does the line counter measure?* The share of source lines in which at least one instruction ran during the tests.
 2. *Which task checks the rule and which writes the reports?* `jacocoTestCoverageVerification` checks; `jacocoTestReport` writes the HTML and the XML.
-3. *Why is coverage 90.3 percent and not 100?* The command-line classes are never fully run by a test (100 of the 243 missed lines), and the rest are lines in other classes that no test reaches, mostly in the clients and the measuring tools.
+3. *Why is coverage 90.8 percent and not 100?* The command-line classes are never fully run by a test (100 of the 235 missed lines), and the rest are lines in other classes that no test reaches, mostly in the clients and the measuring tools.
 4. *What makes the rule part of `check`?* `tasks.check { dependsOn(tasks.jacocoTestCoverageVerification) }`.
-5. *How many lines of headroom are there?* 258: 2,266 covered against 2,008 required.
+5. *How many lines of headroom are there?* 275: 2,315 covered against 2,040 required.
 
 ## Further reading
 

@@ -13,7 +13,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * (a long-lived client is created once and shared, never per request). They are started at a steady
  * rate, so 1,000 connections do not arrive in one burst that overflows the accept backlog.
  *
- * <p>Thread-safe: the list of clients is fixed after start; recording is an atomic flag.
+ * <p>Thread-safe: the list of clients is fixed after start; recording and stopping are atomic
+ * flags.
  */
 public final class ClientFleet {
 
@@ -25,6 +26,7 @@ public final class ClientFleet {
   private final HttpClient http;
   private final AtomicBoolean recording;
   private final Thread watchdog;
+  private final AtomicBoolean stopped = new AtomicBoolean();
 
   private ClientFleet(
       List<FeedClient> clients,
@@ -116,11 +118,16 @@ public final class ClientFleet {
   }
 
   /**
-   * Stops every client and waits for its thread to end, then shuts the HTTP client down.
+   * Stops every client and waits for its thread to end, then shuts the HTTP client down. Only the
+   * first call does this; a later one returns at once, so a caller may stop the fleet before
+   * reading its clients and again in a {@code finally} block, and it is stopped once.
    *
    * @throws InterruptedException if interrupted while waiting
    */
   public void stop() throws InterruptedException {
+    if (!stopped.compareAndSet(false, true)) {
+      return;
+    }
     watchdog.interrupt();
     threads.forEach(Thread::interrupt);
     for (Thread thread : threads) {

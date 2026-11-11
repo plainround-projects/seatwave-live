@@ -10,7 +10,7 @@ A **terminal** is a window where you type commands. The word after the program n
 
 ## Why this repository uses it
 
-The hands-on project of Module 8 must build and test with one command and the same result on every machine. Gradle gives that: `./gradlew check` checks the formatting of the code, compiles it with every warning turned into an error, runs 93 tests and fails if the line coverage is below 80 percent. The tests start real servers on the loopback address and real clients, so the build proves that long polling, server-sent events and WebSockets all deliver the same seat map. The build file also gives each of the six programs (the feed node, the comparison at 1,000 clients, the slow-consumer experiment, the wire-bytes probe and the two lab tools) its own task, so a learner types one short command instead of assembling a long Java command line. It keeps the long measuring runs out of `check`, so the gate takes about half a minute.
+The hands-on project of Module 8 must build and test with one command and the same result on every machine. Gradle gives that: `./gradlew check` checks the formatting of the code, compiles it with every warning turned into an error, runs 103 tests and fails if the line coverage is below 80 percent. The tests start real servers on the loopback address and real clients, so the build proves that long polling, server-sent events and WebSockets all deliver the same seat map. The build file also gives each of the six programs (the feed node, the comparison at 1,000 clients, the slow-consumer experiment, the wire-bytes probe and the two lab tools) its own task, so a learner types one short command instead of assembling a long Java command line. It keeps the long measuring runs out of `check`, so the gate takes about half a minute.
 
 ## Where it appears
 
@@ -75,10 +75,10 @@ plugins {
 
 ```kotlin
 group = "io.plainround"
-version = "1.0.0"
+version = "1.1.0"
 ```
 
-`group` and `version` are the project's own identity in the Maven style: a group, a name (from `settings.gradle.kts`) and a version. They would matter if the project were published as a library. Here they only label the build. The version `1.0.0` is the first release (`CHANGELOG.md`).
+`group` and `version` are the project's own identity in the Maven style: a group, a name (from `settings.gradle.kts`) and a version. They would matter if the project were published as a library. Here they only label the build. The version `1.1.0` is the second release, a fix release after the first, `1.0.0` (`CHANGELOG.md`).
 
 ### The Java toolchain
 
@@ -316,7 +316,7 @@ All commands below ran in a scratch copy of this repository on 11 November 2026 
 ./gradlew --offline clean check
 ```
 
-   It prints one `PASSED` line per test (93 in all), then `> Task :jacocoTestCoverageVerification`, `> Task :spotlessJavaCheck` and ends with `BUILD SUCCESSFUL in 25s` and `10 actionable tasks: 10 executed`.
+   It prints one `PASSED` line per test (103 in all), then `> Task :jacocoTestCoverageVerification`, `> Task :spotlessJavaCheck` and ends with `BUILD SUCCESSFUL in 29s` and `10 actionable tasks: 10 executed`.
 
 3. Run the quickest lab, which needs no server:
 
@@ -355,7 +355,7 @@ All commands below ran in a scratch copy of this repository on 11 November 2026 
 2. *What does `implementation(platform(libs.jackson.bom))` do?* It loads a list of matching versions for the Jackson family, so `jackson-databind`, `jackson-core` and `jackson-annotations` are one release, 2.23.0.
 3. *Why does `-Werror` matter?* It turns every compiler warning into an error, so no warning can stay unnoticed.
 4. *Which line makes the coverage floor part of `check`?* `dependsOn(tasks.jacocoTestCoverageVerification)` inside `tasks.check`.
-5. *Why is `compare` not part of `check`?* It takes about 4 minutes, needs about 2,100 open descriptors, prints numbers for a person to read, and the small-scale version of the same code already runs in `MeasuringToolsTest`.
+5. *Why is `compare` not part of `check`?* It takes about 4 minutes, needs about 2,100 open descriptors across its two processes, prints numbers for a person to read, and the small-scale version of the same code already runs in `MeasuringToolsTest`.
 
 ## Further reading
 

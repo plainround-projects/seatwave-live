@@ -4,14 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SeatWave live seat map</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
-    #map { display: grid; grid-template-columns: repeat(50, 8px); gap: 1px; }
-    #map span { width: 8px; height: 8px; background: #2e7d32; }
-    #map span.h { background: #f9a825; }
-    #map span.s { background: #9e9e9e; }
-    .status { margin: 8px 0; }
-  </style>
+  <!-- The page's security policy allows only files from this feed, so the style is a file too. -->
+  <link rel="stylesheet" href="/live-seat-map.css">
+  <!-- The feed writes its WebSocket address here when it serves the page. -->
+  <meta name="seatwave-websocket" content="@websocket-origin@">
 </head>
 <body>
   <h1>SeatWave live seat map</h1>

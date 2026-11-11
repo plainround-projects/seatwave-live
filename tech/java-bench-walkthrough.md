@@ -1123,12 +1123,28 @@ The fleet values: connects per second, then five durations read with `reader.mil
 `reader.flag` reads `true` or `false`. The heap and the output path follow.
 
 ```java
-    if (!reader.problems().isEmpty()) {
-      return Result.error(reader.problems());
+    List<String> problems = new ArrayList<>(reader.problems());
+    if (fleet.backoffCap().compareTo(fleet.backoffBase()) < 0) {
+      // Each key is in range on its own; the backoff needs them in order, so this is checked here
+      // with the other problems instead of failing later inside a client.
+      problems.add(
+          "compare.backoffCapMillis must be at least compare.backoffBaseMillis ("
+              + fleet.backoffBase().toMillis()
+              + "), but was "
+              + fleet.backoffCap().toMillis());
+    }
+    if (!problems.isEmpty()) {
+      return Result.error(List.copyOf(problems));
     }
 ```
 
-If any problem was recorded, return `Result.error(list)`: nothing is built from half-valid values.
+`problems` starts as a copy of the reader's problem lines, in a list that can still grow (`new ArrayList<>(...)`). Then one check that no single key can make: the backoff's cap must not be below its base. Each of `compare.backoffBaseMillis` and `compare.backoffCapMillis` is in range on its own, but `Backoff` needs them in order. `compareTo` compares two durations and is negative when the first is shorter. In version 1.0.0 nothing checked this here: a file with `compare.backoffCapMillis=50` (and a base of 100) passed, and the comparison later stopped with `IllegalArgumentException` printed as a raw stack trace, from the `Backoff` constructor inside a client. Now it is one more problem line, printed with the others before anything starts:
+
+```text
+settings: compare.backoffCapMillis must be at least compare.backoffBaseMillis (100), but was 50
+```
+
+If any problem was recorded, return `Result.error(...)` with an unmodifiable copy of the list: nothing is built from half-valid values.
 
 ```java
     List<DeliveryMethod> methods = new ArrayList<>();
@@ -1358,7 +1374,7 @@ Phase 3: start the remaining fleet; its client numbers start at `firstClients` s
   }
 ```
 
-`finally { fleets.stop(); }` stops every client whatever happened.
+`finally { fleets.stop(); }` stops every client whatever happened. On a run that reaches the end, `finish` (below) has already stopped the fleets, so that it can read the clients' results; `ClientFleet.stop` does its work only on its first call (`java-client-walkthrough.md`), so the fleets are stopped exactly once on every path, a failed run included.
 
 ```java
 
@@ -1521,7 +1537,7 @@ The result is assembled from the pieces. Note the `Reconnect` merges the server-
 
 `finish` is phase 6.
 
-- `pause` stops the on-sale, `seatMap()` reads the store's true map. `finalSequence` is the digits after the dot of its position (`indexOf('.') + 1`).
+- `pause` stops the on-sale (the server's `/admin/pause` returns only after a tick that was running has finished, so no change follows), `seatMap()` reads the store's true map. `finalSequence` is the digits after the dot of its position (`indexOf('.') + 1`).
 - Wait until all clients are at that sequence, then `stop` them (so no thread is still changing a map or its stats).
 - For each client: if its `states()` string equals the store's, count a correct map; add up gaps, duplicates, reloads and reconnects; collect its delay array.
 - `flatMapToLong(Arrays::stream).toArray()` joins all clients' arrays into one array of up to 20 million delays. `LatencySummary.ofMicros(all)` reads p50, p99 and max.
@@ -2605,17 +2621,17 @@ Real output from this machine (`slowConsumer config/slow-consumer.properties 10 
 ```text
 Java 25.0.2+10-LTS on Mac OS X aarch64, 12 processors; this process may open 1048576 files
 settings: client queue 256 changes, write timeout 2000 ms, on-sale 500 actions per second for 10 s
-changes published: 6302
+changes published: 6297
 deepest client queue: 256 (bound 256)
 queue overflows (client told to reload): 2
 stuck writes cut after the write timeout: 2
 open connections at the end: sse 10, websocket 0 (the 10 normal clients are sse)
-slow clients' own sockets still open on their side: yes
-heap after a collection: 17217 KB before, 18116 KB after
-normal clients: delay p50 0.20 ms, p99 1.00 ms, max 14.78 ms (63020 samples); 10 of 10 match the store
+slow clients' connections ended by the server (each read to its end): yes
+heap after a collection: 17001 KB before, 18109 KB after
+normal clients: delay p50 0.19 ms, p99 0.73 ms, max 11.41 ms (62970 samples); 10 of 10 match the store
 ```
 
-What each line shows. The deepest queue reached its bound, 256. The queue overflowed twice (one per slow client) and each slow client was told to reload. Two blocked writes were cut after the 2,000 ms write timeout. At the end only the 10 normal connections remain open. The heap after a collection barely moved (17,217 KB to 18,116 KB): a slow client costs bounded memory. The normal clients kept a p99 of 1.00 ms and all 10 of 10 ended with the store's map.
+What each line shows. The deepest queue reached its bound, 256. The queue overflowed twice (one per slow client) and each slow client was told to reload. Two blocked writes were cut after the 2,000 ms write timeout. While the normal clients were still connected, only their 10 connections were open. At the end each slow client read what was left in its buffers and reached the end of the stream: the server, not the client, closed both connections. The heap after a collection barely moved (17,001 KB to 18,109 KB): a slow client costs bounded memory. The normal clients kept a p99 of 0.73 ms and all 10 of 10 ended with the store's map.
 
 ```java
 package io.plainround.seatwave.live.bench;
@@ -2631,10 +2647,13 @@ import io.plainround.seatwave.live.feed.FeedPosition;
 import io.plainround.seatwave.live.feed.SeatMapSnapshot;
 import io.plainround.seatwave.live.websocket.Handshake;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -2669,10 +2688,12 @@ The class comment lists what the experiment shows.
   // A small receive buffer fills the kernel's buffers sooner, so the server's write blocks sooner.
   private static final int SLOW_RECEIVE_BUFFER_BYTES = 1_024;
   private static final int DELAYS_PER_CLIENT = 100_000;
+  // Long enough to read a few hundred kilobytes left in the buffers of a closed connection.
+  private static final Duration END_OF_STREAM_WAIT = Duration.ofSeconds(5);
 
 ```
 
-Constants: waits of 20 s with 20 ms polling; `SLOW_RECEIVE_BUFFER_BYTES = 1_024` (the comment explains: a small receive buffer fills the kernel's buffers sooner); and 100,000 delay slots per normal client.
+Constants: waits of 20 s with 20 ms polling; `SLOW_RECEIVE_BUFFER_BYTES = 1_024` (the comment explains: a small receive buffer fills the kernel's buffers sooner); 100,000 delay slots per normal client; and `END_OF_STREAM_WAIT`, 5 seconds, the longest the experiment spends reading what is left in one slow client's buffers at the end.
 
 ```java
   private final LiveSettings settings;
@@ -2722,22 +2743,25 @@ Fields and constructor. The Javadoc says to use settings with a small client que
         node.startOnSale();
         Thread.sleep(runTime);
         long heapAfter = settledHeap();
+        // Pausing waits for a tick already running, so no change can follow the snapshot.
         node.parts().simulator().pause();
         SeatMapSnapshot store = node.parts().store().snapshot();
         awaitTrue(() -> fleet.countAtLeast(store.position().sequence()) == normalClients);
+        // Read while the normal clients are still connected, so the open counts show who is left.
+        Map<String, Long> metrics = metrics(node);
         fleet.stop();
 ```
 
-The steps: wait until all normal clients are loaded; read the heap after a collection (`settledHeap`); switch recording on and **start the on-sale** (`node.startOnSale()`), which is fast here (500 actions per second); sleep for the run time; read the heap again; pause the simulator; take the store's snapshot; wait until the normal clients reach its sequence; stop them.
+The steps: wait until all normal clients are loaded; read the heap after a collection (`settledHeap`); switch recording on and **start the on-sale** (`node.startOnSale()`), which is fast here (500 actions per second); sleep for the run time; read the heap again; pause the simulator; take the store's snapshot; wait until the normal clients reach its sequence; read the server's metrics while the normal clients are still connected; stop them. The comment before `pause()` says why the snapshot is final: `pause` waits for a tick that is already running (`java-feed-walkthrough.md`). In version 1.0.0 a tick could still change a seat after `pause` returned, so the snapshot could be one change old. The metrics are read before `fleet.stop()` so that the "open connections at the end" line counts the connections that are still open because they are healthy, not the ones the server has not yet noticed closing.
 
 ```java
         return report(
-            node,
+            metrics,
             fleet,
             store,
             heapBefore,
             heapAfter,
-            slowStream.isConnected() && slowSocket.isConnected());
+            endedByServer(slowStream) && endedByServer(slowSocket));
       } finally {
         fleet.stop();
       }
@@ -2745,18 +2769,17 @@ The steps: wait until all normal clients are loaded; read the heap after a colle
   }
 ```
 
-Build the report. `slowStream.isConnected() && slowSocket.isConnected()` feeds the line about the slow clients' own sockets; `finally` stops the fleet again (a second stop is harmless).
+Build the report. `endedByServer(slowStream) && endedByServer(slowSocket)` feeds the line about the slow clients: true only if the server ended both connections. Version 1.0.0 passed `slowStream.isConnected() && slowSocket.isConnected()` and printed "slow clients' own sockets still open on their side". `isConnected()` only says that the socket was once connected; it stays true after the other side closes, so the line said "yes" whatever happened. `finally` stops the fleet again; `ClientFleet.stop` does its work only the first time, so this second call returns at once.
 
 ```java
 
   private List<String> report(
-      LiveFeedNode node,
+      Map<String, Long> metrics,
       ClientFleet fleet,
       SeatMapSnapshot store,
       long heapBefore,
       long heapAfter,
-      boolean slowClientsStayedOpen) {
-    Map<String, Long> metrics = metrics(node);
+      boolean slowClientsCutByServer) {
     long correct =
         fleet.clients().stream()
             .filter(client -> client.map().states().equals(store.states()))
@@ -2811,19 +2834,19 @@ The first report line repeats the settings in use (queue bound, write timeout, o
         String.format(
             Locale.ROOT,
             "open connections at the end: sse %d, websocket %d (the %d normal clients are sse)",
-            node.parts().metrics().openConnections(DeliveryMethod.SERVER_SENT_EVENTS),
-            node.parts().metrics().openConnections(DeliveryMethod.WEBSOCKET),
+            metrics.get("seatwave_feed_open_connections{method=\"sse\"}"),
+            metrics.get("seatwave_feed_open_connections{method=\"websocket\"}"),
             normalClients));
 ```
 
-The next lines come straight from the metrics: changes published, the deepest client queue seen (against its bound), queue overflows (`seatwave_feed_queue_overflows_total`: a client told to reload), stuck writes cut (`seatwave_feed_stuck_writer_disconnects_total`), and the open SSE and WebSocket connections at the end.
+The next lines come straight from the metrics: changes published, the deepest client queue seen (against its bound), queue overflows (`seatwave_feed_queue_overflows_total`: a client told to reload), stuck writes cut (`seatwave_feed_stuck_writer_disconnects_total`), and the open SSE and WebSocket connections at the end, read from the metrics taken before the normal clients stopped. `metrics.get(...)` looks a sample up by its full name, labels included; `\"` writes a double quote inside a Java string.
 
 ```java
     lines.add(
         String.format(
             Locale.ROOT,
-            "slow clients' own sockets still open on their side: %s",
-            slowClientsStayedOpen ? "yes" : "no"));
+            "slow clients' connections ended by the server (each read to its end): %s",
+            slowClientsCutByServer ? "yes" : "no"));
     lines.add(
         String.format(
             Locale.ROOT,
@@ -2922,12 +2945,38 @@ The last line: p50, p99 and max of the normal clients' delays, the sample count,
 
 ```java
 
+  // The slow client finally reads what is left in its buffers: the end of the stream, or a reset,
+  // proves the server closed the connection. A connection still open keeps the reads waiting (or
+  // receiving heartbeats) until the deadline.
+  private static boolean endedByServer(Socket socket) throws IOException {
+    socket.setSoTimeout((int) END_OF_STREAM_WAIT.toMillis());
+    InputStream in = socket.getInputStream();
+    byte[] chunk = new byte[SLOW_RECEIVE_BUFFER_BYTES];
+    long deadlineNanos = System.nanoTime() + END_OF_STREAM_WAIT.toNanos();
+    try {
+      // Only the end matters; the bytes the client never read are dropped here.
+      while (System.nanoTime() < deadlineNanos) {
+        if (in.read(chunk) < 0) {
+          return true;
+        }
+      }
+      return false;
+    } catch (SocketTimeoutException stillOpen) {
+      return false;
+    } catch (SocketException reset) {
+      // A reset is the server closing a connection that still had unread bytes in flight.
+      return true;
+    }
+  }
+
   private static void send(Socket socket, String request) throws IOException {
     OutputStream out = socket.getOutputStream();
     out.write(request.getBytes(StandardCharsets.US_ASCII));
     out.flush();
   }
 ```
+
+`endedByServer(socket)` is how the experiment proves, from the slow client's side, that the server closed the connection. At the end the slow client finally reads. `setSoTimeout` makes each `read` give up after 5 seconds with a `SocketTimeoutException`. The loop reads 1,024 bytes at a time and throws them away: they are the changes and heartbeats that waited in the buffers. `read` returns -1 when it reaches the end of the stream, which happens only after the other side closed the connection, so that is a "yes". A `SocketException` (usually "Connection reset") also means the server closed the connection, with bytes still unread; also "yes". A read that times out, or a connection that keeps sending until the 5-second deadline (an open event stream sends a heartbeat every heartbeat interval), means the connection is still open: "no".
 
 `send(socket, request)` writes the text as ASCII bytes and flushes.
 
@@ -2947,7 +2996,7 @@ The last line: p50, p99 and max of the normal clients' delays, the sample count,
   }
 ```
 
-`metrics(node)` reads the node's metrics text directly from its object (`render()`; there is no HTTP here because the node is in this process) and parses each line into a name and a `long`.
+`metrics(node)` reads the node's metrics text directly from its object (`render()`; there is no HTTP here because the node is in this process) and parses each line into a name and a `long`. `run` calls it once, before the normal clients stop, and passes the map to `report`.
 
 ```java
 

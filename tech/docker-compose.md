@@ -81,7 +81,7 @@ services:
 - `- gradle-home:/root/.gradle` is a named volume mounted at `/root/.gradle`, Gradle's cache folder for the user `root` (the user the image runs as). The first run downloads Gradle 9.9.1 and the libraries into it; later runs find them there. The name `gradle-home` is declared at the end of the file.
 - `security_opt:` passes security options to Docker. `- no-new-privileges:true` is one list item. It looks like a key and a value because of the colon, but there is no space after the colon, so YAML reads it as a single piece of text. The option tells the kernel that a program in the container can never gain more rights than it started with, for example through a program that carries the set-user-id flag.
 
-### The `compare` service (lines 19 to 33)
+### The `compare` service (lines 19 to 34)
 
 ```yaml
   compare:
@@ -91,8 +91,9 @@ services:
     volumes:
       - .:/work
       - gradle-home:/root/.gradle
-    # 1,000 clients and 1,000 server connections need about 2,100 descriptors per process; this
-    # raises the container's own limit only, not the host's.
+    # The feed runs in a process of its own: 1,000 connections need about 1,100 descriptors in it
+    # (1,022 to 1,032 were open in the measured runs) and about as many in the clients' process.
+    # This raises the container's own limit only, not the host's.
     ulimits:
       nofile:
         soft: 65536
@@ -103,7 +104,7 @@ services:
 
 The first five keys are the same as in `check`, with these differences:
 - `command: ["./gradlew", "--no-daemon", "-q", "compare", "--args=config/compare.properties"]` runs the Gradle task `compare` (`gradle.md`) instead of `check`. `-q` (quiet) hides Gradle's own messages so only the report shows. `--args=config/compare.properties` hands the settings file to the program. The `=` form keeps the whole option in one list item, so no splitting of words is involved. The path is read from the project folder, which is `/work` here.
-- The two comment lines say why the next block exists: 1,000 clients and 1,000 server connections need many file descriptors, and the block raises the container's own limit only, not the host's. (The comment says "about 2,100 descriptors per process". The README says each of the two processes needs about 1,100, which makes about 2,100 in all. Either way the limit has to be well above the 1,024 that many systems start with.)
+- The three comment lines say why the next block exists. The comparison starts the feed in a process of its own, so the 1,000 server connections are in one process and the 1,000 clients in another, and each process needs about 1,100 file descriptors: one per connection and a few dozen the JVM opens for itself. The measured runs saw 1,022 to 1,032 open in the feed's process, as the comment says, and the README gives the same 1,100 per process. The limit has to be well above the 1,024 that many systems start with. The block raises the container's own limit only, not the host's.
 - `ulimits:` sets resource limits for the processes in the container. `nofile:` is the limit on open files, which includes network connections. `soft: 65536` is the limit the process starts with, and `hard: 65536` is the ceiling the process may raise it to. Both are 65,536, far above what the comparison needs.
 - `security_opt` with `no-new-privileges:true` is the same as in `check`.
 

@@ -11,7 +11,7 @@ This file covers every test source file that the other two test walkthroughs do 
 | `TestSettings.java` | helper | 0 | Small, fast settings for tests: ports chosen by the system, a small map, short timings. |
 | `bench/BenchReportsTest.java` | test | 3 | The arithmetic of the reports: percentiles, the lab's rates, the CSV and the median. |
 | `bench/MeasuringToolsTest.java` | test | 5 | Each measuring tool runs at small scale, start to end, and prints the right shape of report. |
-| `config/LiveSettingsTest.java` | test | 3 | Every shipped settings file is valid; every problem of a bad file is listed in one run. |
+| `config/LiveSettingsTest.java` | test | 4 | Every shipped settings file is valid; every problem of a bad file is listed in one run; a backoff cap below its base is a settings problem. |
 | `src/test/resources/junit-platform.properties` | resource | 0 | A 60-second limit for every test. |
 | `src/test/resources/logback-test.xml` | resource | 0 | The tests' logging: warnings and errors only. |
 
@@ -377,6 +377,11 @@ import io.plainround.seatwave.live.TestSettings;
 import io.plainround.seatwave.live.config.LiveSettings;
 import io.plainround.seatwave.live.config.SettingsReader;
 import io.plainround.seatwave.live.feed.DeliveryMethod;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -388,7 +393,7 @@ class MeasuringToolsTest {
   @TempDir Path folder;
 ```
 
-- The imports bring in the settings classes and `Path`, `Duration`, `List`.
+- The imports bring in the settings classes and `Path`, `Duration`, `List`. `IOException`, `InetAddress`, `ServerSocket`, `StandardCharsets` and `Files` serve the helper at the end of the file that writes a settings file with free ports.
 - `@TempDir Path folder;` is where the comparison writes its CSV and logs.
 
 ```java
@@ -437,7 +442,7 @@ This is the real comparison at small scale, for all three methods.
 ```java
   @Test
   void startsTheFeedInAProcessOfItsOwnAndReadsItsMemory() throws Exception {
-    Path file = Path.of("config/compare-server.properties");
+    Path file = serverSettingsOnFreePorts();
     LiveSettings settings =
         LiveSettings.from(new SettingsReader(SettingsReader.load(file)))
             .discardError()
@@ -445,8 +450,8 @@ This is the real comparison at small scale, for all three methods.
 
     try (ChildProcessServer server =
         ChildProcessServer.start(file, settings, 128, folder.resolve("server.log"))) {
-      assertThat(server.httpPort()).isEqualTo(8092);
-      assertThat(server.webSocketPort()).isEqualTo(8093);
+      assertThat(server.httpPort()).isEqualTo(settings.network().httpPort());
+      assertThat(server.webSocketPort()).isEqualTo(settings.network().websocketPort());
       assertThat(ProcessMemory.residentBytes(server.processId().orElseThrow()).orElseThrow())
           .isPositive();
     }
@@ -455,7 +460,9 @@ This is the real comparison at small scale, for all three methods.
 
 - `SettingsReader.load(file)` reads a properties file; `LiveSettings.from(new SettingsReader(...))` turns it into settings, and `.discardError().orElseThrow()` fails the test with an exception if the file has a problem.
 - `ChildProcessServer.start(file, settings, 128, folder.resolve("server.log"))` starts a **separate Java process** with a 128 MB heap that runs `ServeCli` with the settings file, writes its error output to `server.log`, and waits until the child prints that it is ready. The `try (...)` stops the child at the end.
-- The checks: the ports are 8092 and 8093, as the file says; and `ProcessMemory.residentBytes(pid)` (the child's resident memory, read with the `ps` command) is positive. `orElseThrow()` fails if `ps` could not tell. This test proves the child-process path of the real comparison, which the first test skips. It needs ports 8092 and 8093 and a Unix-like system with `ps`.
+- `serverSettingsOnFreePorts()` (at the end of the file) writes a copy of `config/compare-server.properties` with two ports that are free right now, and the test reads its settings from that copy.
+- The checks: the child serves on the ports the file names; and `ProcessMemory.residentBytes(pid)` (the child's resident memory, read with the `ps` command) is positive. `orElseThrow()` fails if `ps` could not tell. This test proves the child-process path of the real comparison, which the first test skips. It needs a Unix-like system with `ps`.
+- Version 1.0.0 used `config/compare-server.properties` itself, with its fixed ports 8092 and 8093, and checked for exactly those numbers. When another program held either port, the child could not start and the test failed. I checked it by holding both ports with a small listener: the old test failed, the new one passed.
 
 ```java
   @Test
@@ -470,6 +477,11 @@ This is the real comparison at small scale, for all three methods.
                 .startsWith("queue overflows (client told to reload): ")
                 .doesNotEndWith(": 0"));
     assertThat(lines).anySatisfy(line -> assertThat(line).endsWith("3 of 3 match the store"));
+    // Whether the server has ended both slow connections in so short a run depends on how much the
+    // kernel buffers absorb, so only the presence of the check is asserted here.
+    assertThat(lines)
+        .anySatisfy(line ->
+            assertThat(line).matches("slow clients' connections ended by the server .*: (yes|no)"));
   }
 ```
 
@@ -477,6 +489,7 @@ This is the real comparison at small scale, for all three methods.
 - `contains("deepest client queue: 64 (bound 64)")`: the deepest queue reached exactly its bound, no more.
 - The line starting `queue overflows (client told to reload): ` must not end in `: 0`: the slow clients overflowed their queues and were told to reload.
 - A line ends with `3 of 3 match the store`: the three normal clients were not disturbed and ended with the store's map.
+- A line matches `slow clients' connections ended by the server .*: (yes|no)`; `matches` takes a regular expression that must cover the whole line, and `.*` stands for any text. The comment says why the test does not demand `yes`: in a 2-second run, whether the server has ended both slow connections depends on how much the kernel's buffers absorb before a write blocks. In the 10-second lab the answer is `yes` (`java-bench-walkthrough.md`). The test proves that the line is computed and printed.
 
 ```java
   @Test
@@ -517,6 +530,34 @@ This is the real comparison at small scale, for all three methods.
 - `new WireBytesProbe(TestSettings.small(), 5).measure()` measures the bytes on the wire for 5 changes with one client of each method. It returns a header line and three method lines, so `hasSize(4)`. Line 1 starts `long-polling` and line 3 starts `websocket`.
 - `MachineLine.describe()` is the first line of every tool's output ("Java 25.0.2+10-LTS on Mac OS X aarch64, ..."). The test checks it starts with `Java 25`.
 
+```java
+
+  // The comparison's node settings with two ports that are free right now, so the test does not
+  // depend on 8092 and 8093 being unused on this machine.
+  private Path serverSettingsOnFreePorts() throws IOException {
+    int httpPort = freePort();
+    int webSocketPort = freePort();
+    String settings =
+        Files.readString(Path.of("config/compare-server.properties"), StandardCharsets.UTF_8)
+            .replace("http.port=8092", "http.port=" + httpPort)
+            .replace("websocket.port=8093", "websocket.port=" + webSocketPort)
+            .replace("http://127.0.0.1:8092", "http://127.0.0.1:" + httpPort);
+    Path file = folder.resolve("compare-server.properties");
+    Files.writeString(file, settings, StandardCharsets.UTF_8);
+    return file;
+  }
+
+  private static int freePort() throws IOException {
+    try (ServerSocket probe = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+      return probe.getLocalPort();
+    }
+  }
+}
+```
+
+- `serverSettingsOnFreePorts()` reads `config/compare-server.properties` as text, replaces its two ports and the port inside the allowed origin with two free ones, and writes the result into the test's temporary folder. `Files.readString` and `Files.writeString` read and write a whole file, with the charset named. The comment says why: the test must not depend on 8092 and 8093 being unused.
+- `freePort()` asks the system for a free port by opening a listening socket on port 0, reads the port it got (`getLocalPort()`), and closes the socket at once (the `try` with resources). The port is free when the method returns; another program could take it in the moment before the child binds it, but on loopback in a test run that window is a few milliseconds, against a fixed port that any running program could hold.
+
 ### `config/LiveSettingsTest.java`
 
 ```java
@@ -525,6 +566,8 @@ package io.plainround.seatwave.live.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.github.sviperll.result4j.Result;
+import io.plainround.seatwave.live.bench.CompareSettings;
+import io.plainround.seatwave.live.bench.PollingRatesCli;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
@@ -534,7 +577,7 @@ import org.junit.jupiter.api.Test;
 class LiveSettingsTest {
 ```
 
-- `Properties` is the JDK's class for `key=value` settings files. `Result` is the success-or-error type (`result4j.md`). `IOException` is what reading a file can throw.
+- `Properties` is the JDK's class for `key=value` settings files. `Result` is the success-or-error type (`result4j.md`). `IOException` is what reading a file can throw. `CompareSettings` and `PollingRatesCli` are the two `bench` classes whose settings the third and fourth tests read.
 
 ```java
   @Test
@@ -586,17 +629,37 @@ class LiveSettingsTest {
         new SettingsReader(SettingsReader.load(Path.of("config/polling-rates.properties")));
 
     assertThat(
-            io.plainround.seatwave.live.bench.CompareSettings.from(
+            CompareSettings.from(
                     new SettingsReader(SettingsReader.load(Path.of("config/compare.properties"))))
                 .discardError())
         .isPresent();
-    assertThat(io.plainround.seatwave.live.bench.PollingRatesCli.report(rates)).hasSize(9);
+    assertThat(PollingRatesCli.report(rates)).hasSize(9);
     assertThat(rates.problems()).isEmpty();
   }
 ```
 
-- `polling-rates.properties` is read by the lab-1 tool; `compare.properties` by the comparison. `io.plainround.seatwave.live.bench.CompareSettings.from(...)` is written with the full package name instead of an `import`. The first `assertThat` demands it succeeds.
+- `polling-rates.properties` is read by the lab-1 tool; `compare.properties` by the comparison. `CompareSettings.from(...)` reads the comparison's settings, and the first `assertThat` demands it succeeds. (Version 1.0.0 wrote `CompareSettings` and `PollingRatesCli` with their full package names here; version 1.1.0 imports them, like every other class.)
 - `PollingRatesCli.report(rates)` returns the lab's printed lines, and `hasSize(9)` fixes their number: the 9 lines shown in the README. `rates.problems()` must be empty: the file had no missing or invalid key.
+
+```java
+  @Test
+  void reportsABackoffCapBelowItsBaseAsASettingsProblem() throws IOException {
+    Properties compare = SettingsReader.load(Path.of("config/compare.properties"));
+    compare.setProperty("compare.backoffCapMillis", "50");
+
+    Result<CompareSettings, List<String>> settings =
+        CompareSettings.from(new SettingsReader(compare));
+
+    assertThat(settings)
+        .isEqualTo(
+            Result.<CompareSettings, List<String>>error(
+                List.of(
+                    "compare.backoffCapMillis must be at least compare.backoffBaseMillis (100),"
+                        + " but was 50")));
+  }
+```
+
+This test is new in version 1.1.0. It loads the valid `compare.properties` and sets `compare.backoffCapMillis` to 50, below the file's `compare.backoffBaseMillis` of 100. Each key is in range on its own; together they are wrong, because a backoff's cap must not be below its base. `CompareSettings.from` must return an error holding exactly one problem line that names both keys and the two values. `Result.<CompareSettings, List<String>>error(...)` builds the expected error; the types in angle brackets tell Java which kind of `Result` it is. `isEqualTo` works because result4j's `Result.Error` is a record, and records compare by their fields. In version 1.0.0 this file was accepted, and the comparison later stopped with a raw stack trace from the `Backoff` constructor; this test failed against it.
 
 ```java
   private static List<String> problemsOf(Result<LiveSettings, List<String>> settings) {
@@ -653,7 +716,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 ./gradlew --offline cleanTest test --tests '*BenchReportsTest' --tests '*MeasuringToolsTest' --tests '*LiveSettingsTest'
 ```
 
-   Expected: 11 `PASSED` lines (3 + 5 + 3), then `BUILD SUCCESSFUL`. The run takes about 17 seconds, nearly all of it `MeasuringToolsTest`.
+   Expected: 12 `PASSED` lines (3 + 5 + 4), then `BUILD SUCCESSFUL`. The run takes about 21 seconds, nearly all of it `MeasuringToolsTest`.
 
 2. See how long each test took:
 
@@ -661,7 +724,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 grep -o 'testcase name="[^"]*" classname="[^"]*" time="[^"]*"' build/test-results/test/TEST-io.plainround.seatwave.live.bench.MeasuringToolsTest.xml
 ```
 
-   Expected: five lines, with times of about 6.6, 3.4, 3.1 and 3.1 seconds and a short one for the child-process test.
+   Expected: five lines, with times of about 7.0, 6.5, 3.5 and 3.0 seconds and a short one for the child-process test (0.7 seconds). The slow-consumer test is the longest: at the end it may wait up to 5 seconds per slow client for the end of its stream.
 
 3. Run the lab arithmetic that the report test checks:
 
@@ -678,7 +741,7 @@ grep -o 'testcase name="[^"]*" classname="[^"]*" time="[^"]*"' build/test-result
 ## Mistakes people make
 
 - **Asserting a measured number.** A delay or a rate changes on every run. `MeasuringToolsTest` asserts only shapes and counts.
-- **Fixed ports in tests.** Port 0 avoids collisions; the one test that needs 8092 and 8093 fails if they are taken.
+- **Fixed ports in tests.** Port 0 avoids collisions. The child-process test cannot use port 0, because the parent must know the child's ports in advance, so it asks the system for two free ports and writes them into a copy of the settings file. Version 1.0.0 used the fixed ports 8092 and 8093 and failed when they were taken.
 - **A fake clock that is not `volatile`.** Another thread could keep reading an old time.
 - **Reading a file with a path that depends on the folder.** The settings files are found by relative paths because Gradle runs the tests from the project folder.
 - **Reporting one problem at a time.** `LiveSettingsTest` pins the opposite: every problem in one run.

@@ -3,6 +3,8 @@ package io.plainround.seatwave.live.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.github.sviperll.result4j.Result;
+import io.plainround.seatwave.live.bench.CompareSettings;
+import io.plainround.seatwave.live.bench.PollingRatesCli;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
@@ -49,12 +51,28 @@ class LiveSettingsTest {
         new SettingsReader(SettingsReader.load(Path.of("config/polling-rates.properties")));
 
     assertThat(
-            io.plainround.seatwave.live.bench.CompareSettings.from(
+            CompareSettings.from(
                     new SettingsReader(SettingsReader.load(Path.of("config/compare.properties"))))
                 .discardError())
         .isPresent();
-    assertThat(io.plainround.seatwave.live.bench.PollingRatesCli.report(rates)).hasSize(9);
+    assertThat(PollingRatesCli.report(rates)).hasSize(9);
     assertThat(rates.problems()).isEmpty();
+  }
+
+  @Test
+  void reportsABackoffCapBelowItsBaseAsASettingsProblem() throws IOException {
+    Properties compare = SettingsReader.load(Path.of("config/compare.properties"));
+    compare.setProperty("compare.backoffCapMillis", "50");
+
+    Result<CompareSettings, List<String>> settings =
+        CompareSettings.from(new SettingsReader(compare));
+
+    assertThat(settings)
+        .isEqualTo(
+            Result.<CompareSettings, List<String>>error(
+                List.of(
+                    "compare.backoffCapMillis must be at least compare.backoffBaseMillis (100),"
+                        + " but was 50")));
   }
 
   private static List<String> problemsOf(Result<LiveSettings, List<String>> settings) {

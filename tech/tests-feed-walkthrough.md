@@ -2,7 +2,7 @@
 
 ## What it is
 
-This file walks through every test file in the `feed` test package, `src/test/java/io/plainround/seatwave/live/feed/`: seven files, 41 test results. The `feed` package of the main code is the heart of the project: the seat store, the publisher that numbers every change, the replay buffer, the per-connection queue and the connection limit. These tests use no network at all. They create the objects, call their methods and check the results.
+This file walks through every test file in the `feed` test package, `src/test/java/io/plainround/seatwave/live/feed/`: seven files, 43 test results. The `feed` package of the main code is the heart of the project: the seat store, the publisher that numbers every change, the replay buffer, the per-connection queue and the connection limit. These tests use no network at all. They create the objects, call their methods and check the results.
 
 A **test** is a method that runs some code and checks the result (`junit.md`). A **unit test** checks one small part, here one class or a pair of classes, without servers around it. Every file below is quoted whole, in pieces, and each piece is explained line by line.
 
@@ -10,15 +10,15 @@ A **test** is a method that runs some code and checks the result (`junit.md`). A
 | --- | --- | --- |
 | `ConnectionLimitTest.java` | 2 | The limit refuses the connection over the limit, frees a slot exactly once, and drops every open connection. |
 | `FeedPositionTest.java` | 13 | A position is written and read back; every malformed text is refused. |
-| `OnSaleSimulatorTest.java` | 3 | The simulated on-sale makes the changes the store allows, stops when paused, and repeats itself for the same seed. |
+| `OnSaleSimulatorTest.java` | 4 | The simulated on-sale makes the changes the store allows, stops when paused, waits for a running tick before it counts as paused, and repeats itself for the same seed. |
 | `ReplayBufferTest.java` | 6 | The buffer returns every change after a position it still holds and says "reload" otherwise. |
-| `SeatFeedTest.java` | 6 | The publisher gives each subscriber every change exactly once, bounds a slow subscriber's queue, holds long polls, and finds stuck writers. |
+| `SeatFeedTest.java` | 7 | The publisher gives each subscriber every change exactly once, bounds a slow subscriber's queue, holds long polls, finds stuck writers, and writes its metrics with line feeds. |
 | `SeatLayoutTest.java` | 4 | Seat labels, seat numbers and seat states convert both ways. |
 | `SeatStoreTest.java` | 7 | The store's rules: hold, confirm, expire, one winner among racers, snapshot at the right position. |
 
 ## Why this repository uses it
 
-The module's promise is that a client that names its last position receives every later change exactly once, or is told to reload the seat map, and never a silent gap. That promise is made by the `feed` package, so the strictest tests are here. They run in milliseconds (the whole package takes about 0.3 seconds of the 25 seconds the build needs), so every `check` proves the promise again.
+The module's promise is that a client that names its last position receives every later change exactly once, or is told to reload the seat map, and never a silent gap. That promise is made by the `feed` package, so the strictest tests are here. They run in milliseconds (the whole package takes about 0.3 seconds of the 29 seconds the build needs), so every `check` proves the promise again.
 
 ## Where it appears
 
@@ -26,15 +26,16 @@ All seven files are in the test source set and run in `./gradlew test` and in `.
 
 ## How it works underneath
 
-**How a test of a concurrent program stays deterministic.** *Deterministic* means: the same result every run. A program with several threads can interleave its steps in many orders, and a test that depends on one order fails sometimes. These tests use five techniques.
+**How a test of a concurrent program stays deterministic.** *Deterministic* means: the same result every run. A program with several threads can interleave its steps in many orders, and a test that depends on one order fails sometimes. These tests use six techniques.
 
 1. **No real clock.** The store reads the time from a `java.time.Clock` that it is given. The tests give it a `MutableClock`, so "the hold expires after 300 seconds" is tested by calling `clock.advance(...)`, not by waiting 300 seconds.
 2. **Seeded randomness.** The simulated on-sale chooses seats with a `java.util.Random`. A `Random` made with a **seed** (a starting number) produces the same sequence every time. The tests pass seed 8, so "random" choices are the same on every run and every machine.
 3. **No background threads unless the test needs one.** The simulator can run itself on a timer thread (`start()`). The tests never call `start()`; they call `tick()` by hand, one step at a time.
 4. **Check what must be true under every interleaving, not one interleaving.** Where the test does race threads (`SeatFeedTest` joins a feed while a virtual thread publishes 5,000 changes; `SeatStoreTest` lets 50 fans race for one seat), it does not assert a particular order. It asserts the **invariant**: each subscriber sees each sequence number exactly once, in order; exactly one fan wins the seat. A correct program satisfies those under any schedule.
 5. **Make all racers start together.** A `CountDownLatch` (a gate that opens when a counter reaches zero) holds the 50 fans until all of them are ready, then lets them go at once. That makes the race real instead of letting each fan finish before the next one starts.
+6. **Force the one interleaving that matters.** To prove that `pause()` waits for a tick that is already running, `OnSaleSimulatorTest` does not hope the timing comes out right: a clock of its own stops the tick inside the store, so the tick is always in the middle when `pause()` is called. The same idea, the other way round, makes the stuck-writer test independent of time: it hands the feed the moment of the check instead of letting the feed read the clock.
 
-**Which tests rely on real time.** Three tests in `SeatFeedTest` do, and only in small amounts. `answersALongPollAtTheNextChangeOrAtTheEndOfTheHold` waits 50 ms for a long poll to start waiting and has the first poll run its 50 ms hold to the end. `wakesAWaitingWriterAndSaysIdleWhenNothingHappens` lets a 50 ms wait run out. `interruptsOnlyAWriterStuckLongerThanTheTimeout` is the most time-sensitive: it needs one write to be older than 50 ms and another to be younger, so it sleeps 100 ms and then checks within microseconds; on a machine that stalls the test thread for more than 50 ms at the wrong moment it would fail. Every other test in the package runs without waiting. Each of these three also has the JUnit default timeout of 60 seconds as a safety net (`tests-other-packages-walkthrough.md`).
+**Which tests rely on real time.** Two tests in `SeatFeedTest` do, and only in small amounts. `answersALongPollAtTheNextChangeOrAtTheEndOfTheHold` waits 50 ms for a long poll to start waiting and has the first poll run its 50 ms hold to the end. `wakesAWaitingWriterAndSaysIdleWhenNothingHappens` lets a 50 ms wait run out. Neither can fail because the machine is slow: a late poll still finds its change, and an idle wait only lasts longer. `interruptsOnlyAWriterStuckLongerThanTheTimeout` used to be the third, and the one that could fail: it slept 100 ms and then needed the next check to come within 50 ms. Since version 1.1.0 it passes the moment of the check to the feed and does not depend on time at all. The pause test in `OnSaleSimulatorTest` uses real threads, but its order is forced by latches, and its Awaitility wait is only a ceiling. Every other test in the package runs without waiting. Each of these tests also has the JUnit default timeout of 60 seconds as a safety net (`tests-other-packages-walkthrough.md`).
 
 ## Walkthrough of this repository's use
 
@@ -199,15 +200,22 @@ class FeedPositionTest {
 package io.plainround.seatwave.live.feed;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import io.plainround.seatwave.live.MutableClock;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 ```
 
 - `import io.plainround.seatwave.live.MutableClock;` is the helper clock from the root test package.
 - `java.time.Duration` is a length of time; `java.time.Instant` is a point in time.
+- `await` (Awaitility), `Clock`, `ZoneId`, `ZoneOffset`, `CountDownLatch` and `TimeUnit` serve the pause test and its stalling clock, explained below.
 
 ```java
 class OnSaleSimulatorTest {
@@ -268,6 +276,45 @@ class OnSaleSimulatorTest {
 
 ```java
   @Test
+  void pauseWaitsForATickAlreadyRunningSoNoChangeFollowsIt() throws Exception {
+    StallingClock stalling = new StallingClock(Instant.parse("2026-11-11T10:00:00Z"));
+    SeatFeed stallingFeed = new SeatFeed(10_000, 100, 64, new FeedMetrics());
+    SeatStore stallingStore =
+        new SeatStore(new SeatLayout(1, 100), Duration.ofSeconds(4), stalling, stallingFeed);
+    try (OnSaleSimulator simulator = new OnSaleSimulator(stallingStore, 50, 0, 8)) {
+      Thread ticking = Thread.ofPlatform().start(simulator::tick);
+      assertThat(stalling.entered.await(5, TimeUnit.SECONDS)).isTrue();
+      Thread pausing = Thread.ofPlatform().start(simulator::pause);
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .until(() -> pausing.getState() == Thread.State.WAITING || !pausing.isAlive());
+
+      boolean pauseWaitedForTheTick = pausing.isAlive();
+      stalling.release.countDown();
+      ticking.join();
+      pausing.join();
+      long afterPause = stallingFeed.position().sequence();
+
+      assertThat(pauseWaitedForTheTick).isTrue();
+      assertThat(afterPause).isEqualTo(1);
+      assertThat(simulator.tick()).isFalse();
+      assertThat(stallingStore.snapshot().position().sequence()).isEqualTo(afterPause);
+    }
+  }
+```
+
+This test proves the fix of version 1.1.0: `pause()` waits for a tick that is already running, so no change can follow it. In version 1.0.0 `pause()` only set a flag, and the test failed. The difficulty is to make a tick be "already running" at the moment `pause()` is called, every time, and not by luck. The test does it with a clock that stops time inside the store (`StallingClock`, at the end of the file).
+
+- `StallingClock stalling = ...` is the special clock; a second feed and a second store use it. `new OnSaleSimulator(stallingStore, 50, 0, 8)` has a confirm share of 0, so its first tick makes a hold.
+- `Thread ticking = Thread.ofPlatform().start(simulator::tick)` runs one tick on a new thread. The tick takes the simulator's lock, enters `store.expireDue()`, asks the clock for the time, and stops there: the clock does not answer yet.
+- `stalling.entered.await(5, TimeUnit.SECONDS)` waits until the tick has really reached the clock. A `CountDownLatch` is a one-way gate: `await` blocks until another thread has called `countDown` enough times. It returns `true` if that happened within 5 seconds.
+- `Thread pausing = Thread.ofPlatform().start(simulator::pause)` calls `pause()` on a third thread, while the tick is stuck in the middle.
+- The Awaitility wait ends when the pausing thread is either finished or parked (`Thread.State.WAITING`, the state of a thread that waits for a `ReentrantLock`). `boolean pauseWaitedForTheTick = pausing.isAlive();` records which: with the fix, `pause()` is waiting for the tick's lock, so the thread is alive; without it, `pause()` set its flag and finished at once.
+- `stalling.release.countDown()` opens the gate: the clock answers, the tick makes its hold and finishes, and `pause()` gets the lock. `join()` waits for both threads to end. `afterPause` is the feed's sequence at that moment.
+- The checks: `pause()` did wait; the tick that was running finished its one change (sequence 1); a tick after the pause changes nothing; and a snapshot taken now has the same position as when `pause()` returned, so no change slipped in after it. This is the exact pattern of the reconnect test and the slow-consumer run: pause, then snapshot.
+
+```java
+  @Test
   void repeatsTheSameChoicesForTheSameSeed() {
     SeatFeed otherFeed = new SeatFeed(10_000, 100, 64, new FeedMetrics());
     SeatStore other =
@@ -287,6 +334,52 @@ class OnSaleSimulatorTest {
 - A second feed and a second store are built on the **same clock**. The `try` has two resources, closed in reverse order.
 - Both simulators have the same seed 8, and they tick 50 times in step.
 - `assertThat(other.snapshot().states()).isEqualTo(store.snapshot().states());` proves the two maps are identical. This is the determinism technique 2 above, proved by a test: the same seed gives the same on-sale, which is what makes a comparison run repeatable.
+
+```java
+
+  // A clock whose first reading blocks until the test releases it, so a tick can be held inside the
+  // store while another thread pauses the simulator.
+  private static final class StallingClock extends Clock {
+
+    private final CountDownLatch entered = new CountDownLatch(1);
+    private final CountDownLatch release = new CountDownLatch(1);
+    private final Instant now;
+
+    StallingClock(Instant now) {
+      this.now = now;
+    }
+
+    @Override
+    public Instant instant() {
+      if (entered.getCount() > 0) {
+        entered.countDown();
+        try {
+          release.await();
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      return now;
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
+  }
+}
+```
+
+`StallingClock` is a small `Clock` of the test's own. `Clock` is the JDK's abstract source of the current time; the store asks it for `instant()`. A class that `extends Clock` must supply `instant()`, `getZone()` and `withZone(...)`; the last two only return UTC and itself, as `MutableClock` does.
+
+- `entered` and `release` are two latches of count 1. `instant()` checks whether `entered` is still closed (`getCount() > 0`). If so, this is the first reading: it opens `entered` (so the test knows the tick has arrived) and then waits on `release` until the test opens it. Every later reading returns the fixed time at once.
+- `catch (InterruptedException interrupted)` restores the interrupt flag and lets the reading return: a test thread that is being stopped must not hang here.
+- The comment above the class says why it exists: to hold a tick inside the store while another thread pauses the simulator.
 
 ### `ReplayBufferTest.java`
 
@@ -699,10 +792,13 @@ class SeatFeedTest {
             });
     List<Long> seen = new ArrayList<>();
     for (int joiner = 0; joiner < 20; joiner++) {
-      FeedPosition known = feed.position();
-      Subscriber subscriber =
-          feed.subscribe(new FeedPosition(feed.streamId(), Math.max(0, known.sequence() - 3)));
-      seen.add(drainUntil(subscriber, known.sequence() + 1));
+      FeedPosition joinedAt =
+          new FeedPosition(feed.streamId(), Math.max(0, feed.position().sequence() - 3));
+      Subscriber subscriber = feed.subscribe(joinedAt);
+      // The target is a change that exists or is still coming, whichever side finishes first: one
+      // past the join point, but never past the publisher's last hold.
+      long target = Math.min(joinedAt.sequence() + 1, holds);
+      seen.add(drainUntil(subscriber, joinedAt.sequence() + 1, target));
     }
     publisher.join();
     Subscriber last = feed.subscribe(new FeedPosition(feed.streamId(), 0));
@@ -715,12 +811,13 @@ class SeatFeedTest {
 This is the key concurrency test of the project: a subscriber that joins **while changes are being published** still sees every change exactly once.
 - The feed keeps 100,000 changes, lets a subscriber queue 100,000 and carries 64 per batch. The store is the full arena (20 sections of 1,000 seats) with a hold time of 5 minutes, so no hold expires during the test.
 - `Thread.ofVirtual().start(() -> { for ... store.hold(seat); })` starts a virtual thread that holds 5,000 different seats, one after the other, as fast as it can. Each hold is published to the feed.
-- The main thread then joins the feed 20 times in a loop. Each time: `known = feed.position()` reads where the feed is now; `feed.subscribe(new FeedPosition(feed.streamId(), Math.max(0, known.sequence() - 3)))` subscribes with a position three changes behind (but not below 0). The subscriber's starting queue then holds the three catch-up changes from the buffer, and every change published afterwards is added as it arrives. Reading the catch-up and registering the subscriber happen under one lock in the feed, and this test hammers that.
-- `drainUntil(subscriber, known.sequence() + 1)` reads from the subscriber until it has seen the change after `known`, and returns 1 if every sequence number arrived exactly once, in order, with no gap and no repeat, or 0 if not. The result goes into `seen`.
+- The main thread then joins the feed 20 times in a loop. Each time: `joinedAt` is a position three changes behind where the feed is now (`feed.position().sequence() - 3`, but not below 0), and `feed.subscribe(joinedAt)` subscribes from there. The subscriber's starting queue then holds the catch-up changes from the buffer, and every change published afterwards is added as it arrives. Reading the catch-up and registering the subscriber happen under one lock in the feed, and this test hammers that.
+- `target` is the change the joiner reads up to: one past the join point, `joinedAt.sequence() + 1`, but never past `holds`, the publisher's last change. `Math.min` picks the smaller. The comment says why: the target must be a change that exists or is still coming, whichever side finishes first.
+- `drainUntil(subscriber, joinedAt.sequence() + 1, target)` reads from the subscriber until it has seen the target, and returns 1 if the changes started exactly at the first one after the join point and every sequence number arrived once, in order, with no gap and no repeat, or 0 if not. The result goes into `seen`.
 - `publisher.join()` waits for the virtual thread to finish. `last = feed.subscribe(new FeedPosition(feed.streamId(), 0))` is one more subscriber that starts at the very beginning and reads all 5,000.
 - `assertThat(seen).allMatch(gapless -> gapless == 1L);` all 20 joiners were gapless. `assertThat(sequencesIn(last, holds)).isEqualTo(holds);` the last subscriber saw sequences 1 to 5,000, each once, in order.
 - This test never asserts which change a joiner saw first, because that depends on the thread schedule. It asserts what must hold under every schedule (technique 4 above).
-- **A weakness of this test.** The 20 joins must all happen while the publisher is still publishing. If the publisher finishes its 5,000 holds first, a joiner computes `known` as 5,000 and `drainUntil` then waits for change 5,001, which never comes; after the 5-second `LONG` wait it returns 0 and the test fails. I ran this class together with `ReconnectCorrectnessTest` 65 times in a scratch copy while other builds were running on the machine (load average about 2.5). The test failed once with exactly this signature: the first 17 values of `seen` were 1, the last three were 0, and the build took 19 seconds (three waits of 5 seconds). It is a test flaw, not a feed flaw: the invariant it checks was never broken.
+- **A flaw fixed in version 1.1.0.** In version 1.0.0 the target was always one past the feed's position at the join. If the publisher finished its 5,000 holds before the 20 joins were done, a late joiner's target was change 5,001, which never comes; after the 5-second `LONG` wait `drainUntil` returned 0 and the test failed. It failed once in 65 runs on a loaded machine (three joiners late, 19 seconds for the build). It was a test flaw, not a feed flaw: the invariant it checks was never broken. With the target capped at `holds`, the result no longer depends on which thread finishes first. I checked that by forcing the bad order, `publisher.join()` before the joins: the old test failed every time and the new one passes. The new `drainUntil` also checks the first change a joiner receives, which the old one did not.
 
 ```java
   @Test
@@ -784,7 +881,8 @@ This is the key concurrency test of the project: a subscriber that joins **while
     assertThat(((Catchup.Changes) empty).changes()).isEmpty();
     assertThat(((Catchup.Changes) waiting.get(LONG.toMillis(), TimeUnit.MILLISECONDS)).changes())
         .hasSize(1);
-    assertThat(((Catchup.Changes) feed.changesAfter(start)).changes()).hasSize(1);
+    assertThat(((Catchup.Changes) feed.awaitChangesAfter(start, Duration.ZERO)).changes())
+        .hasSize(1);
   }
 ```
 
@@ -792,7 +890,7 @@ This is the long poll test: a request that waits on the server for the next chan
 - `feed.awaitChangesAfter(start, SHORT)` with nothing published waits 50 ms and returns a `Changes` answer with an empty list: the **end of the hold**. This part uses real time, 50 ms.
 - `CompletableFuture.supplyAsync(() -> { try { return feed.awaitChangesAfter(start, LONG); } catch (InterruptedException interrupted) { ... } })` starts a second poll on another thread with a 5-second hold. The lambda needs `try` and `catch` because `awaitChangesAfter` can throw the checked `InterruptedException`, which a plain lambda here cannot pass on. The catch restores the interrupt flag (`Thread.currentThread().interrupt()`) and rethrows as `IllegalStateException`.
 - `Thread.sleep(SHORT);` gives that poll 50 ms to start waiting. Then `store.hold(1)` publishes a change, which wakes the poll.
-- The checks: the first answer was empty; `waiting.get(LONG.toMillis(), TimeUnit.MILLISECONDS)` fetches the second poll's answer and it holds 1 change; `feed.changesAfter(start)` (the no-wait form) also finds 1.
+- The checks: the first answer was empty; `waiting.get(LONG.toMillis(), TimeUnit.MILLISECONDS)` fetches the second poll's answer and it holds 1 change; `feed.awaitChangesAfter(start, Duration.ZERO)`, a poll that does not wait at all, also finds 1. (Version 1.0.0 called a no-wait method, `changesAfter`, here; it was used only by this test, so it was removed from the main code.)
 - If the machine is so slow that the hold happens before the poll starts waiting, the poll finds the change at once and the test still passes. The sleep only makes sure the waiting path is the one exercised; the test cannot fail because of it.
 
 ```java
@@ -828,14 +926,21 @@ This is the long poll test: a request that waits on the server for the next chan
               }
             });
     stuck.beginWrite(blocked);
-    Thread.sleep(SHORT.multipliedBy(2));
+    long stuckSinceNanos = System.nanoTime();
+    // The second write starts strictly later than the first, however fast or slow the machine is.
+    while (System.nanoTime() == stuckSinceNanos) {
+      Thread.onSpinWait();
+    }
     writing.beginWrite(Thread.currentThread());
 
-    int interrupted = feed.disconnectStuckWriters(SHORT);
+    // Checked at the moment the first write reaches the timeout: the first has lasted at least the
+    // timeout, the second strictly less, whatever time really passed in between.
+    int interrupted = feed.disconnectStuckWriters(SHORT, stuckSinceNanos + SHORT.toNanos());
     blocked.join(LONG);
 
     assertThat(interrupted).isEqualTo(1);
     assertThat(blocked.isAlive()).isFalse();
+    assertThat(Thread.interrupted()).isFalse();
     writing.endWrite();
     assertThat(metrics.render()).contains("seatwave_feed_stuck_writer_disconnects_total 1");
   }
@@ -843,15 +948,29 @@ This is the long poll test: a request that waits on the server for the next chan
 
 - Two subscribers: `stuck` and `writing`. A write is the act of sending bytes to a client's socket; if the client does not read, the write blocks. The feed finds writers that have been blocked too long and interrupts them.
 - A virtual thread `blocked` stands in for the stuck writer: it sleeps for `LONG.multipliedBy(4)` (20 seconds) unless interrupted. When interrupted it sets the interrupt flag again and ends.
-- `stuck.beginWrite(blocked)` records "this thread started a write now". The test sleeps 100 ms. Then `writing.beginWrite(Thread.currentThread())` records a second write, started now, by the test thread itself.
-- `feed.disconnectStuckWriters(SHORT)` interrupts every writer whose write started more than 50 ms ago, and returns how many. The first started 100 ms ago and the second microseconds ago. `blocked.join(LONG)` waits for the interrupted thread to end.
-- The checks: exactly 1 writer was interrupted; the `blocked` thread is no longer alive; after `writing.endWrite()` the metrics say `seatwave_feed_stuck_writer_disconnects_total 1`.
-- This is the most time-dependent test of the package: it needs the gap between the two `beginWrite` calls and the check to behave as described. If the test thread were paused for more than 50 ms between `writing.beginWrite` and the check, `writing` would be interrupted too and the test would fail. The margin is 50 ms against a normal gap of microseconds.
+- `stuck.beginWrite(blocked)` records "this thread started a write now", with a reading of `System.nanoTime()`. Right after it, the test takes its own reading, `stuckSinceNanos`, which is equal to or later than the one `beginWrite` took.
+- The `while` loop spins (`Thread.onSpinWait()` tells the processor it is a busy wait) until `System.nanoTime()` has moved past `stuckSinceNanos`. Then `writing.beginWrite(Thread.currentThread())` records a second write, by the test thread itself, whose start is strictly later than `stuckSinceNanos`.
+- `feed.disconnectStuckWriters(SHORT, stuckSinceNanos + SHORT.toNanos())` checks the writers as if the time were exactly `stuckSinceNanos` plus the 50 ms timeout. The first write has then lasted at least 50 ms, so it is stuck; the second has lasted strictly less, so it is not. That holds however much real time passed between the lines, because the check uses the time it is given, not the clock. `blocked.join(LONG)` waits for the interrupted thread to end.
+- The checks: exactly 1 writer was interrupted; the `blocked` thread is no longer alive; the test thread itself was not interrupted (`Thread.interrupted()` reads and clears the flag); after `writing.endWrite()` the metrics say `seatwave_feed_stuck_writer_disconnects_total 1`.
+- Version 1.0.0 slept 100 ms between the two writes and called `disconnectStuckWriters(SHORT)`, which reads the clock itself. If the test thread was paused for more than 50 ms after the second `beginWrite`, on a loaded machine, the second writer counted as stuck too and the test failed. I made that happen on purpose by adding a 60 ms sleep at that point: the old test failed, the new one passed.
 
 ```java
-  // Takes changes until the given sequence has arrived; returns 1 if every sequence came once.
-  private static long drainUntil(Subscriber subscriber, long target) throws InterruptedException {
-    long expected = -1;
+  @Test
+  void endsEveryMetricsLineWithALineFeedOnEveryPlatform() {
+    String text = metrics.render();
+
+    assertThat(text).doesNotContain("\r").endsWith("\n");
+  }
+```
+
+- `metrics.render()` is the Prometheus text the `/metrics` route sends. The format ends every line with a line feed, `\n`. `doesNotContain("\r")` checks that no line ends with a carriage return, and `endsWith("\n")` that the last line is ended too. On macOS and Linux this test also passed with version 1.0.0, which used `%n`, the platform's separator: it is a guard for Windows, where `%n` is `\r\n`. I checked the old class in a JVM started with the Windows separator, and its text had 30 carriage returns.
+
+```java
+  // Takes changes until the target sequence has arrived; returns 1 if they started at the first
+  // sequence after the join point and every sequence came once, in order.
+  private static long drainUntil(Subscriber subscriber, long first, long target)
+      throws InterruptedException {
+    long expected = first;
     while (true) {
       Delivery delivery = subscriber.next(LONG);
       if (!(delivery instanceof Delivery.Batch batch)) {
@@ -859,7 +978,7 @@ This is the long poll test: a request that waits on the server for the next chan
       }
       for (SeatChange change : batch.changes()) {
         long sequence = change.position().sequence();
-        if (expected != -1 && sequence != expected) {
+        if (sequence != expected) {
           return 0;
         }
         expected = sequence + 1;
@@ -872,10 +991,10 @@ This is the long poll test: a request that waits on the server for the next chan
 ```
 
 `drainUntil` is a helper that reads a subscriber until a target sequence arrives.
-- `long expected = -1;` means "the first sequence is not known yet".
-- `while (true)` reads `subscriber.next(LONG)` repeatedly. The comment above the method says what it returns: 1 if every sequence came once.
+- `long expected = first;` is the sequence that must come first: the one right after the join point.
+- `while (true)` reads `subscriber.next(LONG)` repeatedly. The comment above the method says what it returns.
 - `if (!(delivery instanceof Delivery.Batch batch)) { return 0; }` is a **pattern match**: if the delivery is not a batch (it is a reload, an idle tick or a wake) the function gives up with 0, because a gapless stream must be all batches here. If it is a batch, the variable `batch` holds it, already cast.
-- For each change: `sequence` is its number. If `expected` is known and the number is not the expected one, there is a gap or a repeat: return 0.
+- For each change: `sequence` is its number. If it is not the expected one, there is a gap or a repeat: return 0.
 - `expected = sequence + 1;` is the number that must come next.
 - `if (sequence >= target) { return 1; }` reaching the target means success.
 
@@ -910,7 +1029,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 ./gradlew --offline cleanTest test --tests 'io.plainround.seatwave.live.feed.*'
 ```
 
-   Expected: 41 `PASSED` lines (2 + 13 + 3 + 6 + 6 + 4 + 7), then `BUILD SUCCESSFUL`.
+   Expected: 43 `PASSED` lines (2 + 13 + 4 + 6 + 7 + 4 + 7), then `BUILD SUCCESSFUL`.
 
 2. Run only the concurrency test and look at its time:
 
@@ -918,7 +1037,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 ./gradlew --offline cleanTest test --tests '*SeatFeedTest.givesASubscriberEveryChangeExactlyOnceWhileChangesArePublishedAsItJoins'
 ```
 
-   Expected: one `PASSED` line. The XML result `build/test-results/test/TEST-io.plainround.seatwave.live.feed.SeatFeedTest.xml` lists each test with its time; the whole class took 0.296 seconds in the run for these notes.
+   Expected: one `PASSED` line. The XML result `build/test-results/test/TEST-io.plainround.seatwave.live.feed.SeatFeedTest.xml` lists each test with its time; the whole class took 0.165 seconds in the run for these notes.
 
 3. Break the invariant on purpose, in a scratch copy only. In `ReplayBuffer.after` (main code) change `known.sequence() + 1 < oldestKept` to `known.sequence() + 1 < oldestKept - 1` and run `./gradlew --offline test --tests '*ReplayBufferTest'`. Expect `tellsAClientWhoseNextChangeWasOverwrittenToReload() FAILED`: the boundary test catches the off-by-one.
 
@@ -928,7 +1047,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 grep -n "Thread.sleep" src/test/java/io/plainround/seatwave/live/feed/*.java
 ```
 
-   Expected: three lines, all in `SeatFeedTest.java` (lines 92, 121 and 127).
+   Expected: two lines, both in `SeatFeedTest.java` (lines 95 and 125). The second is not a wait for a result: it is the body of the thread that stands in for a stuck writer, and the test interrupts it.
 
 ## Mistakes people make
 
@@ -944,7 +1063,7 @@ grep -n "Thread.sleep" src/test/java/io/plainround/seatwave/live/feed/*.java
 1. *Why does `OnSaleSimulatorTest` call `tick()` instead of `start()`?* `start()` runs the simulator on a timer thread, so the result would depend on real time and thread scheduling. `tick()` runs one step at a time, under the test's control.
 2. *How does `SeatStoreTest` make 50 fans start at the same moment?* Each waits on a `CountDownLatch`; the test counts it down once after all are submitted.
 3. *What does the `Catchup` sealed interface say about gaps?* It has only `Changes` and `ReloadRequired`, so no code path can return a gap.
-4. *Which test depends most on real time, and why?* `interruptsOnlyAWriterStuckLongerThanTheTimeout`: one write must be older than 50 ms and another younger.
+4. *How does `interruptsOnlyAWriterStuckLongerThanTheTimeout` avoid depending on real time?* It passes the moment of the check to `disconnectStuckWriters`: one write is then at least 50 ms old and the other younger, whatever time really passed.
 5. *Why is the confirm of a hold at exactly the hold time refused?* The rule is "valid before the expiry time"; the test checks the boundary.
 
 ## Further reading

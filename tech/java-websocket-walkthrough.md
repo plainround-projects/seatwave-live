@@ -2,7 +2,7 @@
 
 ## What it is
 
-The `websocket` package is a WebSocket server written from scratch against **RFC 6455**, the standard that defines the WebSocket protocol. It runs on plain Java sockets. It has 11 files and about 830 lines.
+The `websocket` package is a WebSocket server written from scratch against **RFC 6455**, the standard that defines the WebSocket protocol. It runs on plain Java sockets. It has 11 files and about 860 lines (859 on the day of version 1.1.0).
 
 A **socket** is the program's end of a network connection: you read bytes from it and write bytes to it. A **WebSocket** is a connection that starts as an ordinary HTTP request, is then "upgraded", and from then on carries small messages called **frames** in both directions for as long as both sides want. The protocol facts (the handshake, the frame layout, masking, ping and pong, close codes) are taught from zero in `real-time-protocols.md`. This note walks the code.
 
@@ -169,6 +169,7 @@ public final class FrameCodec {
   private static final int LARGEST_SIXTEEN_BIT = 0xFFFF;
   private static final int MASK_KEY_BYTES = 4;
   private static final int CONTROL_OPCODES = 0x8;
+  private static final int CONTINUATION = 0x0;
   private static final int BYTE = 0xFF;
   private static final int BITS_PER_BYTE = 8;
   private static final int CLOSE_CODE_BYTES = 2;
@@ -176,7 +177,7 @@ public final class FrameCodec {
   private static final int NO_STATUS_RECEIVED = 1005;
 ```
 
-The magic numbers, each named. `FIN = 0x80` is the top bit of byte 0. `OPCODE_BITS = 0x0F` is the low four bits. `RESERVED_BITS = 0x70` are the three bits in between. `MASK = 0x80` is the top bit of byte 1. `LENGTH_BITS = 0x7F` is its low seven bits. The comment explains the three length forms. `LARGEST_SIXTEEN_BIT = 0xFFFF` is 65,535. `CONTROL_OPCODES = 0x8`: opcodes 8 and above are control frames. `NO_STATUS_RECEIVED = 1005` is the code RFC 6455 reports for a close frame without a code.
+The magic numbers, each named. `FIN = 0x80` is the top bit of byte 0. `OPCODE_BITS = 0x0F` is the low four bits. `RESERVED_BITS = 0x70` are the three bits in between. `MASK = 0x80` is the top bit of byte 1. `LENGTH_BITS = 0x7F` is its low seven bits. The comment explains the three length forms. `LARGEST_SIXTEEN_BIT = 0xFFFF` is 65,535. `CONTROL_OPCODES = 0x8`: opcodes 8 and above are control frames. `CONTINUATION = 0x0` is the opcode of a frame that continues a message started by an earlier frame. `NO_STATUS_RECEIVED = 1005` is the code RFC 6455 reports for a close frame without a code.
 
 ```java
   private FrameCodec() {}
@@ -235,7 +236,8 @@ The private constructor.
    * @param in the connection's input
    * @param maxPayload the largest payload accepted
    * @return the frame, unmasked
-   * @throws ProtocolViolation if the frame is unmasked, fragmented, reserved, or too large
+   * @throws ProtocolViolation if the frame is unmasked, fragmented, reserved, of an unknown opcode,
+   *     or too large
    * @throws EOFException if the peer closed the connection
    * @throws IOException if reading fails
    */
@@ -257,13 +259,30 @@ The private constructor.
 It reads the first two bytes. `first & OPCODE_BITS` extracts the opcode. A nonzero reserved bit would mean an extension was negotiated; none was, so the frame is refused with 1002.
 
 ```java
-    if ((first & FIN) == 0 || opcode == 0) {
+    if (!isDefined(opcode)) {
+      // RFC 6455, section 5.2: an unknown opcode fails the connection; section 7.4.1 names 1002,
+      // protocol error, for that. 1003 is only for a defined kind of data the feed does not accept.
+      throw new ProtocolViolation(CloseCode.PROTOCOL_ERROR, "unknown opcode " + opcode);
+    }
+    if (opcode == CONTINUATION || (opcode >= CONTROL_OPCODES && (first & FIN) == 0)) {
+      // The feed never accepts a first fragment, so a continuation has nothing to continue, and
+      // control frames must never be fragmented (section 5.5).
+      throw new ProtocolViolation(
+          CloseCode.PROTOCOL_ERROR, "a continuation or a fragmented control frame");
+    }
+    if ((first & FIN) == 0) {
       throw new ProtocolViolation(
           CloseCode.UNSUPPORTED_DATA, "fragmented messages are not accepted");
     }
 ```
 
-A frame without FIN, or with opcode 0 (a continuation), is a fragment. The feed refuses fragments with 1003.
+Three checks on the opcode and the FIN bit, in this order.
+
+First, the opcode must be one RFC 6455 defines: 0 (continuation), 1 (text), 2 (binary), 8 (close), 9 (ping) or 10 (pong). The other ten values are reserved for future versions of the protocol. Section 5.2 of the RFC says a receiver of an unknown opcode must fail the connection, and section 7.4.1 gives the close code for that kind of failure: 1002, protocol error. Code 1003 means something else: the frame is valid, but it carries a kind of data the endpoint does not accept. Version 1.0.0 let unknown opcodes through to the session, which answered them with 1003; that was the wrong code, and version 1.1.0 refuses them here with 1002.
+
+Second, a continuation (opcode 0) is a protocol error here too: the feed never accepts the first fragment of a message, so a continuation has nothing to continue. So is a control frame (opcode 8 or more) without FIN, because section 5.5 says control frames must never be fragmented.
+
+Third, any other frame without FIN is the first fragment of a text or binary message. That is legal WebSocket, but the feed accepts no fragmented messages, so it refuses with 1003.
 
 ```java
     if ((second & MASK) == 0) {
@@ -325,6 +344,19 @@ The 4-byte masking key, then the payload. The loop `payload[index] ^= maskKey[in
 ```
 
 `closeCodeOf` reads a close frame's payload. Fewer than two bytes means "no status", reported as 1005. Otherwise the two bytes make the number. `payload[0] & 0xFF` turns a signed byte (-128 to 127) into 0 to 255 before shifting.
+
+```java
+  private static boolean isDefined(int opcode) {
+    return opcode == CONTINUATION
+        || opcode == Frame.TEXT
+        || opcode == Frame.BINARY
+        || opcode == Frame.CLOSE
+        || opcode == Frame.PING
+        || opcode == Frame.PONG;
+  }
+```
+
+`isDefined` lists the six opcodes RFC 6455 defines, using the named constants of `Frame` and `CONTINUATION`. `||` is "or": the answer is true as soon as one comparison is true.
 
 ```java
   private static int readByte(InputStream in) throws IOException {
@@ -1141,13 +1173,15 @@ A close from the client: store a normal close for the writer, wake it, and stop 
 
 ```java
           default ->
+              // The codec has already refused unknown opcodes with 1002, so only a text or a
+              // binary message reaches this branch: data the feed does not accept, 1003.
               throw new ProtocolViolation(
                   CloseCode.UNSUPPORTED_DATA, "the feed accepts no messages");
         }
       }
 ```
 
-Anything else (a text or binary message, or an unknown opcode) is not accepted: close code 1003.
+Anything else is not accepted. By the time a frame gets here, `FrameCodec.read` has already refused unknown opcodes with 1002, so only a text or a binary message reaches the `default` branch: a valid kind of data that the feed does not take, which is what close code 1003 means.
 
 ```java
     } catch (ProtocolViolation violation) {

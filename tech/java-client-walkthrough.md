@@ -1117,7 +1117,8 @@ Imports. `AtomicBoolean` is a boolean that threads can set and read safely.
  * (a long-lived client is created once and shared, never per request). They are started at a steady
  * rate, so 1,000 connections do not arrive in one burst that overflows the accept backlog.
  *
- * <p>Thread-safe: the list of clients is fixed after start; recording is an atomic flag.
+ * <p>Thread-safe: the list of clients is fixed after start; recording and stopping are atomic
+ * flags.
  */
 public final class ClientFleet {
 ```
@@ -1139,6 +1140,7 @@ Two constants. `STOP_WAIT` is how long `stop` waits for each thread to end (10 s
   private final HttpClient http;
   private final AtomicBoolean recording;
   private final Thread watchdog;
+  private final AtomicBoolean stopped = new AtomicBoolean();
 
 ```
 
@@ -1287,11 +1289,16 @@ After all clients are started, the **watchdog** thread starts. It runs `watchSil
 
 ```java
   /**
-   * Stops every client and waits for its thread to end, then shuts the HTTP client down.
+   * Stops every client and waits for its thread to end, then shuts the HTTP client down. Only the
+   * first call does this; a later one returns at once, so a caller may stop the fleet before
+   * reading its clients and again in a {@code finally} block, and it is stopped once.
    *
    * @throws InterruptedException if interrupted while waiting
    */
   public void stop() throws InterruptedException {
+    if (!stopped.compareAndSet(false, true)) {
+      return;
+    }
     watchdog.interrupt();
     threads.forEach(Thread::interrupt);
     for (Thread thread : threads) {
@@ -1302,7 +1309,7 @@ After all clients are started, the **watchdog** thread starts. It runs `watchSil
   }
 ```
 
-`stop()` ends the fleet. It interrupts the watchdog and every client thread. `thread.join(STOP_WAIT)` waits up to 10 seconds for each to end. Then `http.shutdownNow()` closes every connection the HTTP client still holds, and `http.awaitTermination(STOP_WAIT)` waits for its internal threads to finish.
+`stop()` ends the fleet, once. `stopped.compareAndSet(false, true)` is an atomic "if it is false, make it true, and tell me whether you did": the first call to `stop` gets `true` and goes on, every later call gets `false` and returns at once. Callers such as `Comparison` and `SlowConsumer` stop the fleet before they read the clients' results and again in a `finally` block, so the fleet is stopped whichever way the code leaves; with this guard the work is done only the first time. (In version 1.0.0 the second call did the whole stop again: harmless, because every step can be repeated, but not what the code meant.) Then it interrupts the watchdog and every client thread. `thread.join(STOP_WAIT)` waits up to 10 seconds for each to end. Then `http.shutdownNow()` closes every connection the HTTP client still holds, and `http.awaitTermination(STOP_WAIT)` waits for its internal threads to finish.
 
 ```java
 
@@ -1404,6 +1411,7 @@ The class comment states the whole behaviour, including "it fails safe, never ap
   private final ClientStats stats;
   private final Sink sink = new Sink();
   private int failures;
+  private boolean needsMap = true;
   private long disconnectedAtNanos;
   private volatile long lastHeardNanos;
   private volatile boolean following;
@@ -1414,6 +1422,7 @@ Fields.
 
 - `connection`: the delivery method. `seatMaps`: the reader. `backoff`: this client's waits. `recording`: the shared flag. `map`: the copy. `stats`: the counters. `sink`: the object the connection calls.
 - `failures` counts consecutive failures; it picks the backoff attempt number and is reset to 0 on a good connection.
+- `needsMap` says that the client has no usable seat map: true at the start, set to true again by a reload instruction, and set to false only when a map has been loaded.
 - `disconnectedAtNanos` is the clock reading of the first failure of an outage (0 means "not in an outage").
 - `volatile long lastHeardNanos` and `volatile boolean following` are written by the client thread and read by the watchdog thread, so they are `volatile`.
 
@@ -1450,7 +1459,7 @@ The constructor stores the five collaborators, each checked for null. "It does n
   public void run() {
     try {
       while (!Thread.currentThread().isInterrupted()) {
-        if (!map.isLoaded() && !loadMap()) {
+        if (needsMap && !loadMap()) {
           continue;
         }
         Ending ending;
@@ -1462,9 +1471,9 @@ The constructor stores the five collaborators, each checked for null. "It does n
         switch (ending) {
           case RELOAD -> {
             stats.recordReload();
-            if (!loadMap()) {
-              continue;
-            }
+            // The map is stale until a reload succeeds: a failed reload is tried again, never
+            // followed from the old position.
+            needsMap = true;
           }
           case DISCONNECTED -> {
             if (disconnectedAtNanos == 0) {
@@ -1484,9 +1493,9 @@ The constructor stores the five collaborators, each checked for null. "It does n
 `run()` is the loop.
 
 - `while (!Thread.currentThread().isInterrupted())`: run until the thread is told to stop.
-- `if (!map.isLoaded() && !loadMap()) { continue; }`: no map yet and loading failed: go round again (`loadMap` already slept with backoff).
+- `if (needsMap && !loadMap()) { continue; }`: no usable map and loading failed: go round again (`loadMap` already slept with backoff), and the next round tries the load again.
 - `connection.follow(map.position(), sink)` follows from the map's position and returns the reason it ended. The `try ... finally` always sets `following = false` afterwards, even if `follow` throws, so the watchdog never aborts a connection that is not there.
-- `switch (ending)` with arrows. `RELOAD`: count it, then `loadMap()`; if the load fails, `continue`. (The map object still says it is loaded, so the loop follows from its old position; the server answers with a reload again and the cycle repeats, each round after a backoff sleep inside `loadMap`. It repairs itself.) `DISCONNECTED`: remember when the outage began (only the first time, because `disconnectedAtNanos == 0`), then `Thread.sleep(backoff.delay(failures++))`: sleep a random time under the ceiling for this attempt, then increase the attempt counter.
+- `switch (ending)` with arrows. `RELOAD`: count it and set `needsMap = true`; the top of the loop then loads the map, and keeps trying, after a backoff sleep each time, until a load succeeds. In version 1.0.0 this case called `loadMap()` once and, if that failed, went round the loop anyway; the map object still said it was loaded, so the client followed from its old position and the server had to tell it to reload a second time. A stale map is now never followed. `FeedClientTest` checks it. `DISCONNECTED`: remember when the outage began (only the first time, because `disconnectedAtNanos == 0`), then `Thread.sleep(backoff.delay(failures++))`: sleep a random time under the ceiling for this attempt, then increase the attempt counter.
 - `catch (InterruptedException stopped)` ends the loop quietly; `interrupt()` puts the flag back.
 
 ```java
@@ -1540,12 +1549,13 @@ Two accessors: `map()` returns the copy and `stats()` returns the counters (read
       return false;
     }
     map.load(snapshot.get());
+    needsMap = false;
     return true;
   }
 
 ```
 
-`loadMap()` reads the seat map. On failure (`Optional` empty), sleep a backoff wait, count the failure and return false. On success, `map.load(snapshot.get())` and return true.
+`loadMap()` reads the seat map. On failure (`Optional` empty), sleep a backoff wait, count the failure and return false. On success, `map.load(snapshot.get())`, clear `needsMap` and return true.
 
 ```java
   private long delayMicros(String changedAt) {
@@ -1822,7 +1832,9 @@ Imports. `InputStream` reads bytes; `BufferedReader` and `InputStreamReader` tur
  *
  * <p>It parses the event stream format of the WHATWG HTML Living Standard: {@code id}, {@code
  * event} and {@code data} fields, comment lines that start with a colon, and a blank line that ends
- * each event. Not thread-safe: one per client, used by that client's thread.
+ * each event. A {@code data} field may have a space after its colon or none, and several data lines
+ * of one event are joined with a line feed, as the standard says. Not thread-safe: one per client,
+ * used by that client's thread.
  */
 public final class EventStreamConnection implements FeedConnection {
 ```
@@ -1832,10 +1844,11 @@ The class comment: the first request carries `?after=` from the seat map; every 
 ```java
 
   private static final int OK = 200;
+  private static final String DATA = "data";
 
 ```
 
-`OK = 200`.
+`OK = 200`. `DATA` is the name of the one field the client reads, `data`.
 
 ```java
   private final HttpClient http;
@@ -1940,6 +1953,8 @@ Two cases.
 ```java
       if (line.isEmpty()) {
         if (!data.isEmpty()) {
+          // The standard ends every data line with a line feed and drops the last one at dispatch.
+          data.setLength(data.length() - 1);
           MessageView message =
               json.read(data.toString().getBytes(StandardCharsets.UTF_8), MessageView.class);
           data.setLength(0);
@@ -1950,26 +1965,34 @@ Two cases.
         }
 ```
 
-A blank line (`line.isEmpty()`) ends an event. If `data` is not empty, parse it as a `MessageView` (JSON), clear the buffer (`setLength(0)`), and give it to the sink. If the sink says `RELOAD`, return `RELOAD`. Otherwise remember the message's position as `lastId`: this is what a resume will send.
+A blank line (`line.isEmpty()`) ends an event. If `data` is not empty, remove its last character, the line feed added after the last data line (`setLength(data.length() - 1)`, as the standard says), parse it as a `MessageView` (JSON), clear the buffer (`setLength(0)`), and give it to the sink. If the sink says `RELOAD`, return `RELOAD`. Otherwise remember the message's position as `lastId`: this is what a resume will send.
 
 ```java
       } else if (line.startsWith(":")) {
         sink.heartbeat();
-      } else if (line.startsWith("data: ")) {
-        data.append(line, "data: ".length(), line.length());
+      } else if (line.equals(DATA) || line.startsWith(DATA + ":")) {
+        data.append(valueOf(line)).append('\n');
       }
 ```
 
-A line that starts with `:` is a comment, so call `sink.heartbeat()`: the link is alive. A line that starts with `data: ` appends the text after those six characters to the buffer. (`data.append(line, 6, length)` copies a slice.)
+A line that starts with `:` is a comment, so call `sink.heartbeat()`: the link is alive. A `data` field is the line `data` alone, or a line that starts with `data:`. Its value (from `valueOf`, below) is appended to the buffer, followed by a line feed `'\n'`. The WHATWG standard defines both rules: the space after the colon is optional, and the data lines of one event are joined with a line feed. Version 1.0.0 accepted only `data: ` with the space and joined lines with nothing between them, so it ignored a valid `data:{...}` line and could join two lines into text a browser would never see. The feed's own server always writes one `data: ` line per event, so the old client worked against it; the fix makes the client right for any server. `EventStreamConnectionTest` checks both rules.
 
 ```java
       // id, event and retry lines repeat what the JSON already carries.
     }
     return Ending.DISCONNECTED;
   }
+
+  // The value after "data:", without the one space the standard allows after the colon.
+  private static String valueOf(String line) {
+    String value = line.substring(Math.min(line.length(), DATA.length() + 1));
+    return value.startsWith(" ") ? value.substring(1) : value;
+  }
 ```
 
 The comment says why `id`, `event` and `retry` lines are skipped: the JSON already carries the same facts. When `readLine` returns null, the server closed the stream: return `DISCONNECTED`.
+
+`valueOf` takes what follows `data:`. `DATA.length() + 1` is 5, the position just after the colon; `Math.min(line.length(), 5)` keeps the start inside the line when the line is just `data`, which gives an empty value. If the value starts with a space, that one space is removed (`substring(1)`); a second space would be part of the value, as the standard says.
 
 ```java
 

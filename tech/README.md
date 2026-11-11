@@ -22,6 +22,7 @@ Read the ideas first, then the language, then the code of the feed, then the cli
 | `java.md` | Java 25, the language and the JDK, as this repository uses them. |
 | `java-concurrency-in-the-feed.md` | Threads, locks, bounded queues, timeouts and interruption in the feed. |
 | `result4j.md` | The result4j library at 1.2.0: a success-or-error value, and every place the main code uses it. |
+| `jackson.md` | JSON from zero and the Jackson library at 2.23.0: the one mapper of the `wire` package, its records, and every place the code and the tests write or read JSON. |
 | `java-feed-walkthrough.md` | Line by line: the `feed` package (store, publisher, replay buffer, subscribers, positions, metrics). |
 | `java-http-and-wire-walkthrough.md` | Line by line: the root package, `config`, `http` and `wire` (the JDK HTTP server, routes, JSON). |
 | `java-websocket-walkthrough.md` | Line by line: the `websocket` package (handshake, frames, session, server on the JDK sockets). |
@@ -29,7 +30,7 @@ Read the ideas first, then the language, then the code of the feed, then the cli
 | `java-bench-walkthrough.md` | Line by line: the `bench` package (the 1,000-client comparison, percentiles, bytes on the wire, slow consumer, labs), with real runs. |
 | `measuring-a-server.md` | From zero: p50 and p99, file descriptors, CPU cores used, heap against memory outside the heap, and the tools that read them. |
 | `java-properties.md` | The `.properties` format and every file under `config/`, key by key. |
-| `web-page-and-logging.md` | The browser page (HTML, JavaScript) and the logging configuration. |
+| `web-page-and-logging.md` | The browser page (HTML, CSS, JavaScript), its security policy, and the logging configuration. |
 | `gradle.md` | Gradle 9.9.1 and the Kotlin build file: tasks, plugins, the run tasks for the tools. |
 | `gradle-wrapper.md` | The Gradle Wrapper: the pinned Gradle version and how `./gradlew` fetches it. |
 | `posix-shell.md` | The `gradlew` shell script, line by line. |

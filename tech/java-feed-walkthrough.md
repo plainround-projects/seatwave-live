@@ -932,7 +932,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p><b>The invariant.</b> A client that names its last position receives every later change
  * exactly once, or is told to reload the seat map; never a silent gap. It holds because three
  * things happen under one lock: numbering a change and appending it to the buffer ({@link
- * #publish}); reading a catch-up from the buffer ({@link #changesAfter}); and, for a push
+ * #publish}); reading a catch-up from the buffer ({@link #awaitChangesAfter}); and, for a push
  * connection, reading its catch-up and registering it for live changes in the same step ({@link
  * #subscribe}). No change can fall between the catch-up and the live stream, and none can be in
  * both.
@@ -1000,25 +1000,7 @@ The constructor makes the stream identifier: `new SecureRandom().generateSeed(4)
 
 `position` reads the newest position under the lock. The pattern `lock.lock(); try { ... } finally { lock.unlock(); }` is how every method here guards its work.
 
-```java
-  /**
-   * The changes after a client's position, at once.
-   *
-   * @param known the client's position
-   * @return up to the batch size of changes after it, or a reload instruction
-   */
-  public Catchup changesAfter(FeedPosition known) {
-    Objects.requireNonNull(known, "known");
-    lock.lock();
-    try {
-      return buffer.after(known, maxBatch);
-    } finally {
-      lock.unlock();
-    }
-  }
-```
-
-`changesAfter` is a one-shot catch-up: whatever is after the position right now, up to one batch, or reload. It does not wait. The HTTP and WebSocket code does not call it: long polling uses `awaitChangesAfter` and the push methods use `subscribe`. In this repository only a test calls `changesAfter`.
+Version 1.0.0 had one more method here, `changesAfter`, a one-shot catch-up that did not wait. Nothing in the main code called it, only a test, so version 1.1.0 removed it: main code that exists only for a test is code a reader has to understand for nothing. The test now calls `awaitChangesAfter` with a wait of zero, which gives the same answer.
 
 ```java
   /**
@@ -1133,6 +1115,12 @@ The cast `(Catchup.Changes) catchup` is safe because the other case was handled 
    * @return how many writers were interrupted
    */
   public int disconnectStuckWriters(Duration writeTimeout) {
+    return disconnectStuckWriters(writeTimeout, System.nanoTime());
+  }
+
+  // The time of the check is a parameter, so whether a write counts as stuck depends only on the
+  // two readings of System.nanoTime, never on how long the check itself takes to run.
+  int disconnectStuckWriters(Duration writeTimeout, long nowNanos) {
     List<Subscriber> current;
     lock.lock();
     try {
@@ -1140,7 +1128,6 @@ The cast `(Catchup.Changes) catchup` is safe because the other case was handled 
     } finally {
       lock.unlock();
     }
-    long nowNanos = System.nanoTime();
     int interrupted = 0;
     for (Subscriber subscriber : current) {
       if (subscriber.interruptIfStuck(nowNanos, writeTimeout)) {
@@ -1152,7 +1139,7 @@ The cast `(Catchup.Changes) catchup` is safe because the other case was handled 
   }
 ```
 
-`disconnectStuckWriters` is called by the watchdog from `LiveFeedNode`. It copies the subscriber list under the lock (`List.copyOf`), then releases the lock before it does anything else, so the interrupts happen with no lock held. `System.nanoTime()` is read once. For each subscriber, `interruptIfStuck` decides, and the feed counts the disconnects. The return value is how many writers were interrupted.
+`disconnectStuckWriters` is called by the watchdog from `LiveFeedNode`. The public method reads `System.nanoTime()` once and passes the reading to a package-private method with the same name. That method copies the subscriber list under the lock (`List.copyOf`), then releases the lock before it does anything else, so the interrupts happen with no lock held. For each subscriber, `interruptIfStuck` decides by comparing the reading with the time its write began, and the feed counts the disconnects. The return value is how many writers were interrupted. The reading is a parameter so that the answer depends only on the two clock readings and never on how long the check takes; `SeatFeedTest` passes its own reading and so gets the same answer on any machine (`tests-feed-walkthrough.md`).
 
 ```java
   /**
@@ -1404,6 +1391,7 @@ import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Plays an on-sale against the seat store: at a fixed rate it either holds a random available seat
@@ -1411,8 +1399,9 @@ import java.util.concurrent.TimeUnit;
  * publishes are therefore real store changes (holds, confirms, expiries), not invented events.
  *
  * <p>The random choices come from a seeded generator, so two runs make the same choices in the same
- * order. Thread-safe: all store calls run on one scheduler thread; pause and resume only flip a
- * volatile flag.
+ * order. Thread-safe: a tick runs under the simulator's own lock, and pause takes the same lock, so
+ * when {@link #pause()} returns no tick is running and none will change a seat until {@link
+ * #resume()}.
  */
 public final class OnSaleSimulator implements AutoCloseable {
 ```
@@ -1432,11 +1421,13 @@ The simulator plays an on-sale against the store: at a fixed rate it either hold
   private final ScheduledExecutorService scheduler =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> Thread.ofPlatform().name("on-sale").daemon().unstarted(runnable));
-  private volatile boolean paused;
+  // Held for a whole tick and by pause, so a tick already running finishes before pause returns.
+  private final ReentrantLock tickLock = new ReentrantLock();
+  private boolean paused;
 
 ```
 
-`HOLD_ATTEMPTS` is 8: a random seat may already be taken; after eight tries the tick gives up instead of scanning the map. `heldByUs` remembers the seats this simulator holds. The scheduler is a `ScheduledExecutorService` with one thread. The lambda `runnable -> Thread.ofPlatform().name("on-sale").daemon().unstarted(runnable)` is a thread factory: it makes an ordinary (platform) thread named `on-sale`; `daemon()` marks it so the program may exit while it is still running; `unstarted` returns it for the executor to start. `paused` is volatile because one thread sets it and the scheduler thread reads it.
+`HOLD_ATTEMPTS` is 8: a random seat may already be taken; after eight tries the tick gives up instead of scanning the map. `heldByUs` remembers the seats this simulator holds. The scheduler is a `ScheduledExecutorService` with one thread. The lambda `runnable -> Thread.ofPlatform().name("on-sale").daemon().unstarted(runnable)` is a thread factory: it makes an ordinary (platform) thread named `on-sale`; `daemon()` marks it so the program may exit while it is still running; `unstarted` returns it for the executor to start. `tickLock` is the simulator's own lock: a tick holds it from start to end, and `pause` and `resume` take it to change `paused`. `paused` is a plain `boolean`, not `volatile`, because it is only ever read and written while `tickLock` is held, and a lock makes a write visible to the next thread that takes it (`java-concurrency-in-the-feed.md`).
 
 ```java
   /**
@@ -1472,20 +1463,31 @@ The constructor checks the rate and the percentage. `Duration.ofSeconds(1).divid
 
   /**
    * Stops every change, expiries included, so the seat map stands still and clients can catch up
-   * and be compared with the store.
+   * and be compared with the store. It waits for a tick that is already running to finish, so a
+   * snapshot taken after it returns is the last state until {@link #resume()}.
    */
   public void pause() {
-    paused = true;
+    tickLock.lock();
+    try {
+      paused = true;
+    } finally {
+      tickLock.unlock();
+    }
   }
 
   /** Starts making holds and confirms again. */
   public void resume() {
-    paused = false;
+    tickLock.lock();
+    try {
+      paused = false;
+    } finally {
+      tickLock.unlock();
+    }
   }
 
 ```
 
-`start` asks the scheduler to run `tick` at a fixed rate. `this::tick` is a method reference. The delays are given in nanoseconds with `TimeUnit.NANOSECONDS`. `pause` and `resume` flip the flag; the lab's admin routes call them to freeze the map so a comparison can be exact.
+`start` asks the scheduler to run `tick` at a fixed rate. `this::tick` is a method reference. The delays are given in nanoseconds with `TimeUnit.NANOSECONDS`. `pause` and `resume` set the flag while they hold `tickLock`; the lab's admin routes, the slow-consumer run, the resume lab and the reconnect test call `pause` to freeze the map so a comparison with the store can be exact. Because a running tick holds `tickLock`, `pause` waits until that tick has finished before it can set the flag. When `pause` returns, no tick is running and every later tick will see `paused` and change nothing, so a snapshot taken next is final. In version 1.0.0 `pause` only set a `volatile` flag: a tick that had already checked the flag could still change a seat after `pause` returned, and the reconnect test failed about twice in 65 runs with one seat different from the snapshot.
 
 ```java
   /**
@@ -1494,9 +1496,28 @@ The constructor checks the rate and the percentage. `Duration.ofSeconds(1).divid
    * @return true if the tick made a hold or a confirm
    */
   public boolean tick() {
-    if (paused) {
-      return false;
+    tickLock.lock();
+    try {
+      return !paused && act();
+    } finally {
+      tickLock.unlock();
     }
+  }
+```
+
+`tick` takes `tickLock`, and `return !paused && act();` does the work only when the on-sale is not paused: `&&` evaluates its right side only when the left side is true, so a paused tick returns `false` without calling `act`. The `finally` block lets the lock go on every path, also when `act` throws.
+
+```java
+  @Override
+  public void close() {
+    scheduler.shutdownNow();
+  }
+```
+
+`close` stops the scheduler at once with `shutdownNow`. `@Override` says the method implements `AutoCloseable.close`.
+
+```java
+  private boolean act() {
     store.expireDue();
     if (!heldByUs.isEmpty() && random.nextInt(PERCENT) < confirmPercent) {
       // A confirm of an expired hold is refused by the store; that is the rule working, not a bug.
@@ -1513,17 +1534,13 @@ The constructor checks the rate and the percentage. `Duration.ofSeconds(1).divid
   }
 ```
 
-`tick`. If paused, do nothing. Otherwise call `store.expireDue()`. Then, if the simulator holds anything and a random number from 0 to 99 is below `confirmPercent`, it confirms the oldest of its holds and returns whether that worked (`!...isError()`). A confirm of an expired hold is refused by the store; the comment says that is the rule working. If it did not confirm, it tries up to eight random seats to hold; the first success is remembered and ends the tick. If all eight fail it returns `false`.
+`act` is the tick's work, private so that only `tick` can call it and only under the lock. It calls `store.expireDue()` first. Then, if the simulator holds anything and a random number from 0 to 99 is below `confirmPercent`, it confirms the oldest of its holds and returns whether that worked (`!...isError()`). A confirm of an expired hold is refused by the store; the comment says that is the rule working. If it did not confirm, it tries up to eight random seats to hold; the first success is remembered and ends the tick. If all eight fail it returns `false`.
 
 ```java
-  @Override
-  public void close() {
-    scheduler.shutdownNow();
-  }
 }
 ```
 
-`close` stops the scheduler at once with `shutdownNow`.
+The closing brace ends the class.
 
 ### `ConnectionLimit.java`
 
@@ -1875,7 +1892,9 @@ Simple recorders. `recordQueueDepth` uses `deepestQueue.accumulateAndGet(depth, 
 
 ```java
   private static void line(StringBuilder text, String name, long value) {
-    text.append(String.format(Locale.ROOT, "%s %d%n", name, value));
+    // The text format ends every line with a line feed on every platform, never with %n's
+    // platform separator, which is a carriage return and a line feed on Windows.
+    text.append(String.format(Locale.ROOT, "%s %d\n", name, value));
   }
 
   private static <T> Map<DeliveryMethod, T> perMethod(java.util.function.Supplier<T> maker) {
@@ -1888,7 +1907,7 @@ Simple recorders. `recordQueueDepth` uses `deepestQueue.accumulateAndGet(depth, 
 }
 ```
 
-`line` writes `name value` and a line break; `%s` is a text, `%d` a whole number and `%n` the platform's line separator. `perMethod` is a **generic method**: `<T>` stands for any type, so the same code builds a map of `AtomicInteger`s and a map of `LongAdder`s. `Supplier<T>` is a function with no arguments that returns a `T`. The `EnumMap` is filled with one fresh `T` per method.
+`line` writes `name value` and a line break; `%s` is a text and `%d` a whole number. The line break is `\n`, a line feed, written as an escape inside the template. The Prometheus text format, which `/metrics` follows, separates lines with a line feed. Version 1.0.0 used `%n` instead, which is the platform's line separator: a line feed on macOS and Linux, but a carriage return and a line feed on Windows, so the same code would have written a different format there. I checked the old and new classes in a JVM started with the Windows separator (`java -Dline.separator=$'\r\n' ...`): the old text had 30 carriage returns, the new one none. `perMethod` is a **generic method**: `<T>` stands for any type, so the same code builds a map of `AtomicInteger`s and a map of `LongAdder`s. `Supplier<T>` is a function with no arguments that returns a `T`. The `EnumMap` is filled with one fresh `T` per method.
 
 ## Try it yourself
 
@@ -1901,7 +1920,7 @@ ls src/main/java/io/plainround/seatwave/live/feed | wc -l
 cat src/main/java/io/plainround/seatwave/live/feed/*.java | wc -l
 ```
 
-The output was `16` and `1393`. Your numbers match if the code has not changed.
+The output was `16` and `1405`. Your numbers match if the code has not changed.
 
 **2. Watch a position being read.** First compile with `./gradlew -q compileJava` (the first run downloads nothing if the libraries are cached; without a cache it needs the network). Then save this as `PositionDemo.java` in any empty folder:
 

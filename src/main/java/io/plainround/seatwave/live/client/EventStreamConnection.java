@@ -22,11 +22,14 @@ import java.util.Objects;
  *
  * <p>It parses the event stream format of the WHATWG HTML Living Standard: {@code id}, {@code
  * event} and {@code data} fields, comment lines that start with a colon, and a blank line that ends
- * each event. Not thread-safe: one per client, used by that client's thread.
+ * each event. A {@code data} field may have a space after its colon or none, and several data lines
+ * of one event are joined with a line feed, as the standard says. Not thread-safe: one per client,
+ * used by that client's thread.
  */
 public final class EventStreamConnection implements FeedConnection {
 
   private static final int OK = 200;
+  private static final String DATA = "data";
 
   private final HttpClient http;
   private final FeedEndpoints endpoints;
@@ -92,6 +95,8 @@ public final class EventStreamConnection implements FeedConnection {
     while ((line = lines.readLine()) != null) {
       if (line.isEmpty()) {
         if (!data.isEmpty()) {
+          // The standard ends every data line with a line feed and drops the last one at dispatch.
+          data.setLength(data.length() - 1);
           MessageView message =
               json.read(data.toString().getBytes(StandardCharsets.UTF_8), MessageView.class);
           data.setLength(0);
@@ -102,12 +107,18 @@ public final class EventStreamConnection implements FeedConnection {
         }
       } else if (line.startsWith(":")) {
         sink.heartbeat();
-      } else if (line.startsWith("data: ")) {
-        data.append(line, "data: ".length(), line.length());
+      } else if (line.equals(DATA) || line.startsWith(DATA + ":")) {
+        data.append(valueOf(line)).append('\n');
       }
       // id, event and retry lines repeat what the JSON already carries.
     }
     return Ending.DISCONNECTED;
+  }
+
+  // The value after "data:", without the one space the standard allows after the colon.
+  private static String valueOf(String line) {
+    String value = line.substring(Math.min(line.length(), DATA.length() + 1));
+    return value.startsWith(" ") ? value.substring(1) : value;
   }
 
   @Override

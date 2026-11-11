@@ -18,8 +18,8 @@ The guarantee of Module 8 is: every change reaches every watching client exactly
 |---|---|
 | Virtual threads, one per connection | `http/FeedHttpServer.java`, `websocket/WebSocketServer.java`, `websocket/WebSocketSession.java` |
 | Platform threads for timers | `feed/OnSaleSimulator.java`, `LiveFeedNode.java` |
-| Locks and conditions | `feed/SeatFeed.java`, `feed/Subscriber.java`, `feed/SeatStore.java` |
-| Atomics, adders, `volatile` | `feed/FeedMetrics.java`, `feed/Subscriber.java`, `websocket/WebSocketSession.java`, `feed/OnSaleSimulator.java` |
+| Locks and conditions | `feed/SeatFeed.java`, `feed/Subscriber.java`, `feed/SeatStore.java`, `feed/OnSaleSimulator.java` |
+| Atomics, adders, `volatile` | `feed/FeedMetrics.java`, `feed/Subscriber.java`, `websocket/WebSocketSession.java` |
 | Bounded queue per connection | `feed/Subscriber.java` |
 | Bounded connections, ring, batch, frame, head | `feed/ConnectionLimit.java`, `feed/ReplayBuffer.java`, `config/LiveSettings.java`, `websocket/FrameCodec.java`, `websocket/Handshake.java` |
 | Timeouts | `feed/SeatFeed.java`, `feed/Subscriber.java`, `websocket/WebSocketSession.java`, `LiveFeedNode.java` |
@@ -95,8 +95,12 @@ The two timers are on platform threads, named so they can be found in a thread d
   private final ScheduledExecutorService scheduler =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> Thread.ofPlatform().name("on-sale").daemon().unstarted(runnable));
-  private volatile boolean paused;
+  // Held for a whole tick and by pause, so a tick already running finishes before pause returns.
+  private final ReentrantLock tickLock = new ReentrantLock();
+  private boolean paused;
 ```
+
+The on-sale's fields end with its own lock, `tickLock`, and the `paused` flag that the lock guards. They are explained under "Locks, conditions and the lock order" below.
 
 ```java
     Duration writeTimeout = settings.timing().writeTimeout();
@@ -143,7 +147,7 @@ try { ... guarded work ... } finally { lock.unlock(); }
 
 A **condition** belongs to a lock. A thread that holds the lock can call `await` on the condition: it gives up the lock, sleeps, and takes the lock back before returning, after another thread called `signal` or `signalAll`, or the time ran out. The check is always in a loop, because a thread can wake up without a signal (a spurious wakeup) and because by the time it runs again the situation may have changed.
 
-There are three locks, with three jobs.
+There are four locks, with four jobs.
 
 ```java
   private final ReentrantLock lock = new ReentrantLock();
@@ -201,6 +205,32 @@ The **store's lock** makes "check the seat's state and change it" one indivisibl
 
 Each subscriber has a **third lock**, taken by the feed during `offer` (feed, then subscriber) and by the writer in `next` (subscriber only). The writer never asks for the feed's lock while holding its own, so the order feed, then subscriber, cannot be reversed.
 
+The simulated on-sale has the **fourth lock**, `tickLock`. A tick holds it from start to end, and `pause()` takes it to set the flag:
+
+```java
+  public void pause() {
+    tickLock.lock();
+    try {
+      paused = true;
+    } finally {
+      tickLock.unlock();
+    }
+  }
+```
+
+```java
+  public boolean tick() {
+    tickLock.lock();
+    try {
+      return !paused && act();
+    } finally {
+      tickLock.unlock();
+    }
+  }
+```
+
+Why a lock and not a `volatile` flag, as in version 1.0.0? A flag can only stop the *next* tick. A tick that has already read "not paused" goes on and changes a seat, maybe after `pause()` has returned and after the caller has taken the store's snapshot. The reconnect test then saw a client's map one seat away from a snapshot that was already out of date, about twice in 65 runs. With the lock, `pause()` cannot take it while a tick runs, so it returns only after that tick has finished, and every later tick sees `paused` and changes nothing. "Paused" now means: no tick is running and none will start. `paused` needs no `volatile` any more, because every read and write of it happens under the lock, and a lock makes a write visible to the next thread that takes it. The lock order is simulator, then store, then feed: a tick holds `tickLock` while it calls the store, and no code that holds the store's or the feed's lock ever asks for `tickLock`.
+
 The long poll's wait shows a condition in a loop:
 
 ```java
@@ -236,6 +266,12 @@ The long poll's wait shows a condition in a loop:
    * @return how many writers were interrupted
    */
   public int disconnectStuckWriters(Duration writeTimeout) {
+    return disconnectStuckWriters(writeTimeout, System.nanoTime());
+  }
+
+  // The time of the check is a parameter, so whether a write counts as stuck depends only on the
+  // two readings of System.nanoTime, never on how long the check itself takes to run.
+  int disconnectStuckWriters(Duration writeTimeout, long nowNanos) {
     List<Subscriber> current;
     lock.lock();
     try {
@@ -243,7 +279,6 @@ The long poll's wait shows a condition in a loop:
     } finally {
       lock.unlock();
     }
-    long nowNanos = System.nanoTime();
     int interrupted = 0;
     for (Subscriber subscriber : current) {
       if (subscriber.interruptIfStuck(nowNanos, writeTimeout)) {
@@ -254,6 +289,8 @@ The long poll's wait shows a condition in a loop:
     return interrupted;
   }
 ```
+
+The public method reads the clock once, with `System.nanoTime()`, and hands the reading to a package-private one that does the work. Whether a write counts as stuck then depends only on two readings of the clock, the one taken when the write began and the one taken here, and not on how long the loop itself takes to run. The test of this method uses that: it passes a reading of its own and gets the same answer on a fast machine and a loaded one (`tests-feed-walkthrough.md`).
 
 ### Atomics and `volatile`
 
@@ -287,7 +324,7 @@ An **atomic** class such as `AtomicInteger` offers operations like `incrementAnd
   }
 ```
 
-A **`volatile`** field is one whose reads and writes are always seen by every thread at once, with no lock; it does not make `x = x + 1` safe, but a single write read by others is. The subscriber uses it for the two values the watchdog reads (the time the current write started, and the writer's thread), and the simulator for its pause flag:
+A **`volatile`** field is one whose reads and writes are always seen by every thread at once, with no lock; it does not make `x = x + 1` safe, but a single write read by others is. The subscriber uses it for the two values the watchdog reads (the time the current write started, and the writer's thread):
 
 ```java
   private static final long NOT_WRITING = 0;
@@ -434,7 +471,7 @@ The writer's side, the other half of the exchange:
 
 A catch-up read at subscription time uses the same `offer`, so a catch-up longer than the queue's bound also ends in a reload. The bound applies from the first change.
 
-The slow-consumer lab runs this for real: 50 normal clients and slow ones that stop reading, on-sale at 500 changes per second, queue bound 256, write timeout 2,000 ms. I ran it in a copy of the repository on ports 18496 and 18497 (the lab's settings use 8096 and 8097):
+The slow-consumer lab runs this for real: 50 normal clients and slow ones that stop reading, on-sale at 500 changes per second, queue bound 256, write timeout 2,000 ms. I ran it from the repository folder on 11 November 2026, with version 1.1.0:
 
 ```bash
 ./gradlew -q slowConsumer --args='config/slow-consumer.properties 50 10'
@@ -443,17 +480,17 @@ The slow-consumer lab runs this for real: 50 normal clients and slow ones that s
 ```text
 Java 25.0.2+10-LTS on Mac OS X aarch64, 12 processors; this process may open 1048576 files
 settings: client queue 256 changes, write timeout 2000 ms, on-sale 500 actions per second for 10 s
-changes published: 6296
+changes published: 6298
 deepest client queue: 256 (bound 256)
 queue overflows (client told to reload): 2
 stuck writes cut after the write timeout: 2
 open connections at the end: sse 50, websocket 0 (the 50 normal clients are sse)
-slow clients' own sockets still open on their side: yes
-heap after a collection: 61054 KB before, 59528 KB after
-normal clients: delay p50 0.45 ms, p99 2.07 ms, max 28.67 ms (314800 samples); 50 of 50 match the store
+slow clients' connections ended by the server (each read to its end): yes
+heap after a collection: 57111 KB before, 59721 KB after
+normal clients: delay p50 0.58 ms, p99 1.89 ms, max 32.96 ms (314900 samples); 50 of 50 match the store
 ```
 
-The deepest queue was exactly the bound, never above it. Two overflows and two cut writes (the two slow clients). The 50 normal clients still saw a median delay of 0.45 ms and all 50 ended with a map equal to the store's. The README has its own run of the same command with nearly the same numbers (6,298 changes published, p50 0.55 ms); the figures differ a little on every run.
+The deepest queue was exactly the bound, never above it. Two overflows and two cut writes (the two slow clients), and both slow clients, reading at last, found that the server had closed their connections. The 50 normal clients still saw a median delay of 0.58 ms and all 50 ended with a map equal to the store's. The README has its own run of the same command; the figures differ a little on every run.
 
 ### How the code avoids one slow reader slowing the others
 
@@ -673,7 +710,7 @@ After the streams ended, the virtual-thread count went back to 1 and the open co
 ## Check yourself
 
 1. **Why does `Subscriber.offer` clear the queue when it is full instead of waiting for room?** Waiting would block the publisher, and with it every client. Clearing and marking for reload keeps the publisher fast and the memory bounded, and the client recovers with one reload.
-2. **Which lock is taken first when both are needed?** The store's, then the feed's. The reverse order could deadlock.
+2. **Which lock is taken first when both are needed?** The store's, then the feed's (and the on-sale's tick lock before both). The reverse order could deadlock.
 3. **Why is `Condition.awaitNanos` called in a `while` loop?** A thread can wake without a signal, and the situation may have changed again before it runs; the condition must be checked again each time.
 4. **How is a client that stopped reading cut off, when a blocking socket write has no timeout?** The writer marks the time each write begins; the watchdog, which runs four times per write timeout, interrupts a writer whose write is older than the timeout; the interrupt closes the socket.
 5. **What does a thread have to do after catching `InterruptedException` if it does not stop?** Set the interrupt flag again with `Thread.currentThread().interrupt()`.

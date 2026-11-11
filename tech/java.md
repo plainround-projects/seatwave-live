@@ -134,6 +134,7 @@ A **constant** is a `static final` field. The compiler allows underscores inside
   private static final int LARGEST_SIXTEEN_BIT = 0xFFFF;
   private static final int MASK_KEY_BYTES = 4;
   private static final int CONTROL_OPCODES = 0x8;
+  private static final int CONTINUATION = 0x0;
   private static final int BYTE = 0xFF;
   private static final int BITS_PER_BYTE = 8;
   private static final int CLOSE_CODE_BYTES = 2;
@@ -240,15 +241,7 @@ An **array** is a fixed-size row of items of one type. `new SeatChange[capacity]
 `if` / `else`, `for`, `while`, the enhanced `for` that visits each item of a collection, and the conditional expression `a ? b : c`.
 
 ```java
-  /**
-   * Runs one tick at once, on the caller's thread; used by tests and by {@link #start()}.
-   *
-   * @return true if the tick made a hold or a confirm
-   */
-  public boolean tick() {
-    if (paused) {
-      return false;
-    }
+  private boolean act() {
     store.expireDue();
     if (!heldByUs.isEmpty() && random.nextInt(PERCENT) < confirmPercent) {
       // A confirm of an expired hold is refused by the store; that is the rule working, not a bug.

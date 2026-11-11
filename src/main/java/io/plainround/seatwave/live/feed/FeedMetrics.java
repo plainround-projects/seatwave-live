@@ -178,7 +178,9 @@ public final class FeedMetrics {
   }
 
   private static void line(StringBuilder text, String name, long value) {
-    text.append(String.format(Locale.ROOT, "%s %d%n", name, value));
+    // The text format ends every line with a line feed on every platform, never with %n's
+    // platform separator, which is a carriage return and a line feed on Windows.
+    text.append(String.format(Locale.ROOT, "%s %d\n", name, value));
   }
 
   private static <T> Map<DeliveryMethod, T> perMethod(java.util.function.Supplier<T> maker) {

@@ -11,10 +11,13 @@ import io.plainround.seatwave.live.feed.FeedPosition;
 import io.plainround.seatwave.live.feed.SeatMapSnapshot;
 import io.plainround.seatwave.live.websocket.Handshake;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -39,6 +42,8 @@ public final class SlowConsumer {
   // A small receive buffer fills the kernel's buffers sooner, so the server's write blocks sooner.
   private static final int SLOW_RECEIVE_BUFFER_BYTES = 1_024;
   private static final int DELAYS_PER_CLIENT = 100_000;
+  // Long enough to read a few hundred kilobytes left in the buffers of a closed connection.
+  private static final Duration END_OF_STREAM_WAIT = Duration.ofSeconds(5);
 
   private final LiveSettings settings;
   private final int normalClients;
@@ -77,17 +82,20 @@ public final class SlowConsumer {
         node.startOnSale();
         Thread.sleep(runTime);
         long heapAfter = settledHeap();
+        // Pausing waits for a tick already running, so no change can follow the snapshot.
         node.parts().simulator().pause();
         SeatMapSnapshot store = node.parts().store().snapshot();
         awaitTrue(() -> fleet.countAtLeast(store.position().sequence()) == normalClients);
+        // Read while the normal clients are still connected, so the open counts show who is left.
+        Map<String, Long> metrics = metrics(node);
         fleet.stop();
         return report(
-            node,
+            metrics,
             fleet,
             store,
             heapBefore,
             heapAfter,
-            slowStream.isConnected() && slowSocket.isConnected());
+            endedByServer(slowStream) && endedByServer(slowSocket));
       } finally {
         fleet.stop();
       }
@@ -95,13 +103,12 @@ public final class SlowConsumer {
   }
 
   private List<String> report(
-      LiveFeedNode node,
+      Map<String, Long> metrics,
       ClientFleet fleet,
       SeatMapSnapshot store,
       long heapBefore,
       long heapAfter,
-      boolean slowClientsStayedOpen) {
-    Map<String, Long> metrics = metrics(node);
+      boolean slowClientsCutByServer) {
     long correct =
         fleet.clients().stream()
             .filter(client -> client.map().states().equals(store.states()))
@@ -146,14 +153,14 @@ public final class SlowConsumer {
         String.format(
             Locale.ROOT,
             "open connections at the end: sse %d, websocket %d (the %d normal clients are sse)",
-            node.parts().metrics().openConnections(DeliveryMethod.SERVER_SENT_EVENTS),
-            node.parts().metrics().openConnections(DeliveryMethod.WEBSOCKET),
+            metrics.get("seatwave_feed_open_connections{method=\"sse\"}"),
+            metrics.get("seatwave_feed_open_connections{method=\"websocket\"}"),
             normalClients));
     lines.add(
         String.format(
             Locale.ROOT,
-            "slow clients' own sockets still open on their side: %s",
-            slowClientsStayedOpen ? "yes" : "no"));
+            "slow clients' connections ended by the server (each read to its end): %s",
+            slowClientsCutByServer ? "yes" : "no"));
     lines.add(
         String.format(
             Locale.ROOT,
@@ -220,6 +227,30 @@ public final class SlowConsumer {
     socket.setReceiveBufferSize(SLOW_RECEIVE_BUFFER_BYTES);
     socket.connect(new java.net.InetSocketAddress(InetAddress.getLoopbackAddress(), port));
     return socket;
+  }
+
+  // The slow client finally reads what is left in its buffers: the end of the stream, or a reset,
+  // proves the server closed the connection. A connection still open keeps the reads waiting (or
+  // receiving heartbeats) until the deadline.
+  private static boolean endedByServer(Socket socket) throws IOException {
+    socket.setSoTimeout((int) END_OF_STREAM_WAIT.toMillis());
+    InputStream in = socket.getInputStream();
+    byte[] chunk = new byte[SLOW_RECEIVE_BUFFER_BYTES];
+    long deadlineNanos = System.nanoTime() + END_OF_STREAM_WAIT.toNanos();
+    try {
+      // Only the end matters; the bytes the client never read are dropped here.
+      while (System.nanoTime() < deadlineNanos) {
+        if (in.read(chunk) < 0) {
+          return true;
+        }
+      }
+      return false;
+    } catch (SocketTimeoutException stillOpen) {
+      return false;
+    } catch (SocketException reset) {
+      // A reset is the server closing a connection that still had unread bytes in flight.
+      return true;
+    }
   }
 
   private static void send(Socket socket, String request) throws IOException {

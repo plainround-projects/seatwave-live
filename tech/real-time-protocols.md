@@ -325,7 +325,7 @@ public enum CloseCode {
   TOO_BIG(1009);
 ```
 
-1000 is a normal end (the feed sends it after a reload message), 1001 means going away (the server stops, or the peer stopped answering), 1002 a protocol error, 1003 data the feed cannot accept (it accepts no messages from clients) and 1009 a message too big. A close frame without a code is reported as 1005 (RFC 6455 reserves 1005 and 1006 for local reporting; they are never sent). The close for 1000 is the four bytes `88 02 03 e8`.
+1000 is a normal end (the feed sends it after a reload message), 1001 means going away (the server stops, or the peer stopped answering), 1002 a protocol error (an unmasked frame, an unknown opcode, a fragmented control frame), 1003 data the feed cannot accept (it accepts no messages from clients) and 1009 a message too big. A close frame without a code is reported as 1005 (RFC 6455 reserves 1005 and 1006 for local reporting; they are never sent). The close for 1000 is the four bytes `88 02 03 e8`.
 
 **Heartbeats in this repository.** The writer pings when nothing was sent for one heartbeat interval. The reader's socket timeout is three intervals. Any frame from the client, a pong included, resets the timeout. I tested it with a raw socket that completes the handshake and then never answers anything, on a node whose heartbeat I set to 400 ms:
 

@@ -86,8 +86,18 @@ public record CompareSettings(
     boolean child = reader.flag("compare.childProcess");
     int heap = reader.intBetween("compare.childHeapMegabytes", 1, MAX_HEAP_MEGABYTES);
     String output = reader.matching("compare.output", PATH, "a relative folder path");
-    if (!reader.problems().isEmpty()) {
-      return Result.error(reader.problems());
+    List<String> problems = new ArrayList<>(reader.problems());
+    if (fleet.backoffCap().compareTo(fleet.backoffBase()) < 0) {
+      // Each key is in range on its own; the backoff needs them in order, so this is checked here
+      // with the other problems instead of failing later inside a client.
+      problems.add(
+          "compare.backoffCapMillis must be at least compare.backoffBaseMillis ("
+              + fleet.backoffBase().toMillis()
+              + "), but was "
+              + fleet.backoffCap().toMillis());
+    }
+    if (!problems.isEmpty()) {
+      return Result.error(List.copyOf(problems));
     }
     List<DeliveryMethod> methods = new ArrayList<>();
     for (String label : methodList.split(",")) {

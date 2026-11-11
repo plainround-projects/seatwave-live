@@ -156,6 +156,26 @@ class FeedHttpServerTest {
   }
 
   @Test
+  void servesAPageThatNeedsNothingItsPolicyBlocksAndNamesTheRealWebSocketPort() throws Exception {
+    String webSocketOrigin = "ws://127.0.0.1:" + node.webSocketPort();
+
+    HttpResponse<String> page = get("/");
+    HttpResponse<String> style = get("/live-seat-map.css");
+    String script = get("/live-seat-map.js").body();
+
+    // default-src 'self' blocks inline style and script, so the page must have none.
+    assertThat(page.body()).doesNotContain("<style", "style=", "<script>");
+    assertThat(page.body())
+        .contains("<link rel=\"stylesheet\" href=\"/live-seat-map.css\">")
+        .contains("<meta name=\"seatwave-websocket\" content=\"" + webSocketOrigin + "\">");
+    assertThat(page.headers().firstValue("Content-Security-Policy"))
+        .hasValue("default-src 'self'; connect-src 'self' " + webSocketOrigin);
+    assertThat(style.headers().firstValue("Content-Type")).hasValue("text/css; charset=utf-8");
+    assertThat(style.body()).contains("#map span.h");
+    assertThat(script).contains("WEBSOCKET_ORIGIN").doesNotContain("8091");
+  }
+
+  @Test
   void pausesResumesDropsAndSettlesThroughTheAdminRoutes() throws Exception {
     assertThat(post("/admin/pause").body()).isEqualTo("{\"onSale\":\"paused\"}");
     assertThat(post("/admin/resume").body()).isEqualTo("{\"onSale\":\"running\"}");

@@ -60,14 +60,30 @@ class FrameCodecTest {
   }
 
   @Test
+  void refusesAnUnknownOpcodeAndAStrayContinuationAsProtocolErrors() {
+    for (int opcode : new int[] {0x3, 0x7, 0xB, 0xF}) {
+      assertThatThrownBy(() -> FrameCodec.read(input(clientFrame(0x80 | opcode, "a")), 125))
+          .isInstanceOf(ProtocolViolation.class)
+          .hasMessageContaining("unknown opcode")
+          .extracting(violation -> ((ProtocolViolation) violation).closeCode())
+          .isEqualTo(CloseCode.PROTOCOL_ERROR);
+    }
+    assertThatThrownBy(() -> FrameCodec.read(input(clientFrame(0x80, "a")), 125))
+        .extracting(violation -> ((ProtocolViolation) violation).closeCode())
+        .isEqualTo(CloseCode.PROTOCOL_ERROR);
+    assertThatThrownBy(() -> FrameCodec.read(input(clientFrame(Frame.PING, "a")), 125))
+        .extracting(violation -> ((ProtocolViolation) violation).closeCode())
+        .isEqualTo(CloseCode.PROTOCOL_ERROR);
+  }
+
+  @Test
   void readsALongerFrameAndTheCloseCodeOfAPayload() throws IOException {
     Frame frame = FrameCodec.read(input(clientFrame(0x80 | Frame.TEXT, "b".repeat(300))), 1_000);
 
     assertThat(frame.payload()).hasSize(300);
     assertThat(FrameCodec.closeCodeOf(new byte[] {0x03, (byte) 0xE9})).isEqualTo(1001);
     assertThat(FrameCodec.closeCodeOf(new byte[0])).isEqualTo(1005);
-    assertThat(ProtocolViolationCode.of(new ProtocolViolation(CloseCode.TOO_BIG, "x")))
-        .isEqualTo(1009);
+    assertThat(new ProtocolViolation(CloseCode.TOO_BIG, "x").closeCode().code()).isEqualTo(1009);
   }
 
   private static ByteArrayInputStream input(byte[] bytes) {
@@ -93,11 +109,5 @@ class FrameCodecTest {
     frame.flip();
     frame.get(bytes);
     return bytes;
-  }
-
-  private static final class ProtocolViolationCode {
-    static int of(ProtocolViolation violation) {
-      return violation.closeCode().code();
-    }
   }
 }

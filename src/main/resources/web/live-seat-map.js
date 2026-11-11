@@ -4,7 +4,8 @@
 // it is the next one; a reload message, or a change that is not the next one, loads the map again.
 "use strict";
 
-const WEBSOCKET_PORT = 8091;
+// The feed writes its WebSocket origin into the page, so the port is the one it really listens on.
+const WEBSOCKET_ORIGIN = document.querySelector('meta[name="seatwave-websocket"]').content;
 const SHOWN_SEATS = 1000;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30000;
@@ -16,7 +17,11 @@ const seats = [];
 let streamId = "";
 let sequence = 0;
 let connection = null;
+let reconnectTimer = 0;
 let failures = 0;
+// Each restart starts a new generation; work left over from an older one (a map still loading, a
+// reconnect timer, a socket's events) sees the number has moved on and stops.
+let generation = 0;
 
 for (let seatIndex = 0; seatIndex < SHOWN_SEATS; seatIndex++) {
   const seat = document.createElement("span");
@@ -31,9 +36,13 @@ function show(seatIndex, code) {
   }
 }
 
-async function loadMap() {
+// Returns the map's position, or null when a later restart has made this load stale.
+async function loadMap(started) {
   const reply = await fetch("/v1/events/1/seat-map", { cache: "no-store" });
   const map = await reply.json();
+  if (started !== generation) {
+    return null;
+  }
   [streamId, sequence] = splitPosition(map.position);
   for (let seatIndex = 0; seatIndex < SHOWN_SEATS; seatIndex++) {
     show(seatIndex, map.states[seatIndex]);
@@ -66,8 +75,11 @@ function apply(message) {
   return true;
 }
 
-async function follow() {
-  const position = await loadMap();
+async function follow(started) {
+  const position = await loadMap(started);
+  if (position === null) {
+    return;
+  }
   if (methodElement.value === "sse") {
     // EventSource reconnects by itself after the server's retry delay, to the same URL, and sends
     // the last id it saw in the Last-Event-ID header; the server resumes from there.
@@ -76,38 +88,45 @@ async function follow() {
     source.onopen = () => { stateElement.textContent = "open (server-sent events)"; };
     source.onerror = () => { stateElement.textContent = "reconnecting"; };
     source.addEventListener("seat", (event) => {
-      if (!apply(JSON.parse(event.data))) { restart(); }
+      if (started === generation && !apply(JSON.parse(event.data))) { restart(); }
     });
     source.addEventListener("reload", restart);
     return;
   }
   // A WebSocket does not reconnect by itself: the page backs off with full jitter and resumes from
   // the last change it applied.
-  openSocket();
+  openSocket(started);
 }
 
-function openSocket() {
-  const socket = new WebSocket("ws://127.0.0.1:" + WEBSOCKET_PORT
+function openSocket(started) {
+  const socket = new WebSocket(WEBSOCKET_ORIGIN
       + "/v1/events/1/seat-changes/socket?after=" + streamId + "." + sequence);
   connection = socket;
   socket.onopen = () => { failures = 0; stateElement.textContent = "open (WebSocket)"; };
   socket.onmessage = (event) => {
-    if (!apply(JSON.parse(event.data))) { restart(); }
+    if (started === generation && !apply(JSON.parse(event.data))) { restart(); }
   };
   socket.onclose = () => {
+    if (started !== generation) {
+      return;
+    }
     stateElement.textContent = "reconnecting";
     const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** failures++);
-    setTimeout(openSocket, Math.random() * ceiling);
+    reconnectTimer = setTimeout(() => openSocket(started), Math.random() * ceiling);
   };
 }
 
+// Ends everything the current generation owns, so exactly one connection follows the feed.
 function restart() {
+  generation++;
+  clearTimeout(reconnectTimer);
   if (connection) {
     connection.onclose = null;
     connection.close();
+    connection = null;
   }
-  follow();
+  follow(generation);
 }
 
 methodElement.addEventListener("change", restart);
-follow();
+follow(generation);

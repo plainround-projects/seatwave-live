@@ -7,6 +7,7 @@ import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Plays an on-sale against the seat store: at a fixed rate it either holds a random available seat
@@ -14,8 +15,9 @@ import java.util.concurrent.TimeUnit;
  * publishes are therefore real store changes (holds, confirms, expiries), not invented events.
  *
  * <p>The random choices come from a seeded generator, so two runs make the same choices in the same
- * order. Thread-safe: all store calls run on one scheduler thread; pause and resume only flip a
- * volatile flag.
+ * order. Thread-safe: a tick runs under the simulator's own lock, and pause takes the same lock, so
+ * when {@link #pause()} returns no tick is running and none will change a seat until {@link
+ * #resume()}.
  */
 public final class OnSaleSimulator implements AutoCloseable {
 
@@ -31,7 +33,9 @@ public final class OnSaleSimulator implements AutoCloseable {
   private final ScheduledExecutorService scheduler =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> Thread.ofPlatform().name("on-sale").daemon().unstarted(runnable));
-  private volatile boolean paused;
+  // Held for a whole tick and by pause, so a tick already running finishes before pause returns.
+  private final ReentrantLock tickLock = new ReentrantLock();
+  private boolean paused;
 
   /**
    * Creates the simulator; it does nothing until {@link #start()}.
@@ -62,15 +66,26 @@ public final class OnSaleSimulator implements AutoCloseable {
 
   /**
    * Stops every change, expiries included, so the seat map stands still and clients can catch up
-   * and be compared with the store.
+   * and be compared with the store. It waits for a tick that is already running to finish, so a
+   * snapshot taken after it returns is the last state until {@link #resume()}.
    */
   public void pause() {
-    paused = true;
+    tickLock.lock();
+    try {
+      paused = true;
+    } finally {
+      tickLock.unlock();
+    }
   }
 
   /** Starts making holds and confirms again. */
   public void resume() {
-    paused = false;
+    tickLock.lock();
+    try {
+      paused = false;
+    } finally {
+      tickLock.unlock();
+    }
   }
 
   /**
@@ -79,9 +94,20 @@ public final class OnSaleSimulator implements AutoCloseable {
    * @return true if the tick made a hold or a confirm
    */
   public boolean tick() {
-    if (paused) {
-      return false;
+    tickLock.lock();
+    try {
+      return !paused && act();
+    } finally {
+      tickLock.unlock();
     }
+  }
+
+  @Override
+  public void close() {
+    scheduler.shutdownNow();
+  }
+
+  private boolean act() {
     store.expireDue();
     if (!heldByUs.isEmpty() && random.nextInt(PERCENT) < confirmPercent) {
       // A confirm of an expired hold is refused by the store; that is the rule working, not a bug.
@@ -95,10 +121,5 @@ public final class OnSaleSimulator implements AutoCloseable {
       }
     }
     return false;
-  }
-
-  @Override
-  public void close() {
-    scheduler.shutdownNow();
   }
 }

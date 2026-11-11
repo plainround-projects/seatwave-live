@@ -1,5 +1,6 @@
 package io.plainround.seatwave.live.websocket;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -111,6 +112,33 @@ class WebSocketServerTest {
   }
 
   @Test
+  void closesAClientThatSendsAnUnknownOpcodeWithProtocolError() throws Exception {
+    try (LiveFeedNode node = LiveFeedNode.start(TestSettings.small(), Clock.systemUTC());
+        Raw client = Raw.connect(node.webSocketPort())) {
+      client.send(handshake("?after=" + node.parts().feed().position().written(), ""));
+      client.readUntil("\r\n\r\n");
+
+      client.sendBytes(maskedFrame(0x80 | 0x3, new byte[0]));
+
+      assertThat(client.input().readNBytes(4)).containsExactly(0x88, 2, 0x03, 0xEA);
+    }
+  }
+
+  @Test
+  void answersAClientPingWithAPongCarryingTheSamePayload() throws Exception {
+    try (LiveFeedNode node = LiveFeedNode.start(TestSettings.small(), Clock.systemUTC());
+        Raw client = Raw.connect(node.webSocketPort())) {
+      client.send(handshake("?after=" + node.parts().feed().position().written(), ""));
+      client.readUntil("\r\n\r\n");
+
+      client.sendBytes(maskedFrame(0x80 | Frame.PING, "are you there".getBytes(US_ASCII)));
+
+      assertThat(client.input().readNBytes(2)).containsExactly(0x80 | Frame.PONG, 13);
+      assertThat(new String(client.input().readNBytes(13), US_ASCII)).isEqualTo("are you there");
+    }
+  }
+
+  @Test
   void refusesAWebSocketOverTheConnectionLimit() throws Exception {
     try (HttpClient http = HttpClient.newHttpClient();
         LiveFeedNode node =
@@ -143,6 +171,17 @@ class WebSocketServerTest {
     return http.newWebSocketBuilder()
         .buildAsync(uri, recorder)
         .get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+  }
+
+  // A client frame with a short payload, masked as RFC 6455 requires of every client frame.
+  private static byte[] maskedFrame(int firstByte, byte[] payload) {
+    byte[] mask = {0x11, 0x22, 0x33, 0x44};
+    ByteBuffer frame = ByteBuffer.allocate(2 + mask.length + payload.length);
+    frame.put((byte) firstByte).put((byte) (0x80 | payload.length)).put(mask);
+    for (int index = 0; index < payload.length; index++) {
+      frame.put((byte) (payload[index] ^ mask[index % mask.length]));
+    }
+    return frame.array();
   }
 
   private static String handshake(String query, String extra) {

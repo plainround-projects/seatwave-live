@@ -21,17 +21,18 @@ The README lists Awaitility with the other test libraries: "The tests, their ass
 | `gradle/libs.versions.toml` | `awaitility = "4.3.0"` and the entry `awaitility`. |
 | `build.gradle.kts` | `testImplementation(libs.awaitility)`. |
 | `gradle.lockfile` | Locks `org.awaitility:awaitility:4.3.0` and its dependency `org.hamcrest:hamcrest:2.1` (`dependency-locking.md`). |
-| `src/test/java/.../websocket/WebSocketServerTest.java` | One `await()` call (line 119). |
-| `src/test/java/.../client/ReconnectCorrectnessTest.java` | Three `await()` calls (lines 27, 29 and 36). |
+| `src/test/java/.../websocket/WebSocketServerTest.java` | One `await()` call (line 147). |
+| `src/test/java/.../client/ReconnectCorrectnessTest.java` | Four `await()` calls (lines 29, 31, 37 and 44). |
+| `src/test/java/.../feed/OnSaleSimulatorTest.java` | One `await()` call (line 62). |
 
-I searched the test sources: `await()` appears four times, in those two files (a fifth `await`, `start.await()` in `SeatStoreTest`, is the JDK's `CountDownLatch`, unrelated). The tests are not free of `Thread.sleep`: it appears seven times, listed at the end of this file with the reason for each. They are short pauses with a stated purpose, never a wait for a result.
+I searched the test sources: `await()` appears six times, in those three files (two more `await` calls, `start.await()` in `SeatStoreTest` and `release.await()` in `OnSaleSimulatorTest`, are the JDK's `CountDownLatch`, unrelated). The tests are not free of `Thread.sleep`: it appears five times, listed at the end of this file with the reason for each. They are short pauses with a stated purpose, never a wait for a result.
 
 ## How it works underneath
 
 1. `await()` returns a **condition factory**. You describe the wait on it, and the last call, here `until(...)`, runs it.
 2. `until(condition)` takes a **lambda** that returns `true` or `false` (a `Callable<Boolean>`). Awaitility calls it, and if the answer is `false` it waits one **poll interval** and calls it again. The default poll interval is 100 milliseconds, and the default poll delay (the wait before the first check) is also 100 milliseconds.
 3. When the lambda returns `true`, `until` returns and the test goes on.
-4. When the time limit passes first, `until` throws a `ConditionTimeoutException`, and the test fails with a message that names the condition. The default limit is 10 seconds. `atMost(...)` sets it. This repository sets 5 seconds in one place and 10 seconds in the other.
+4. When the time limit passes first, `until` throws a `ConditionTimeoutException`, and the test fails with a message that names the condition. The default limit is 10 seconds. `atMost(...)` sets it. This repository sets 5 seconds in two places and 10 seconds in the third.
 5. By default Awaitility evaluates the condition on a separate thread that it starts, while the thread that called `await()` waits for the answer. The lambdas here only read a counter, which is safe from any thread: `ClientSeatMap.sequence()` is a `volatile` field, and `FeedMetrics.openConnections` reads an atomic counter.
 6. If the lambda itself throws, the exception is not hidden: the wait ends and the test fails with it. The tests here do not ask Awaitility to ignore exceptions.
 
@@ -76,6 +77,24 @@ This is the `import static` line from `ReconnectCorrectnessTest` (line 4). It le
 - `await().atMost(WAIT).until(() -> node.parts().metrics().openConnections(DeliveryMethod.WEBSOCKET) == 1)` waits until the server's own counter says that exactly one WebSocket is open. `WAIT` is `Duration.ofSeconds(5)`.
 - Only then does the test open a raw second connection with `Raw`, send the upgrade request and expect `HTTP/1.1 503` with `Retry-After: 1`. Without a guard of this kind, a server that counted the connection a moment late would let the second request in, and the test would sometimes see `101` instead of `503`.
 
+### Waiting for a thread to block on a lock
+
+```java
+      Thread ticking = Thread.ofPlatform().start(simulator::tick);
+      assertThat(stalling.entered.await(5, TimeUnit.SECONDS)).isTrue();
+      Thread pausing = Thread.ofPlatform().start(simulator::pause);
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .until(() -> pausing.getState() == Thread.State.WAITING || !pausing.isAlive());
+```
+
+This is from `OnSaleSimulatorTest`, the test that proves `pause()` waits for a tick that is already running (`tests-feed-walkthrough.md`).
+
+- `Thread ticking = Thread.ofPlatform().start(simulator::tick)` runs one tick on a new thread. The test's clock makes that tick stop inside the seat store until the test lets it go.
+- `stalling.entered.await(5, TimeUnit.SECONDS)` is the JDK's `CountDownLatch`, not Awaitility: it waits until the tick has really reached the clock.
+- `Thread pausing = Thread.ofPlatform().start(simulator::pause)` calls `pause()` on a third thread.
+- `await().atMost(Duration.ofSeconds(5)).until(() -> pausing.getState() == Thread.State.WAITING || !pausing.isAlive())` waits until the pausing thread has either finished or is parked waiting for a lock. `getState()` reads a thread's state; `WAITING` is what a thread that waits for a `ReentrantLock` shows. The condition has two ends on purpose: with the fix the thread waits, and without it the thread finishes at once, and the test must reach its assertion in both cases to tell them apart.
+
 ### Waiting for ten clients to catch up
 
 ```java
@@ -88,8 +107,14 @@ This is the `import static` line from `ReconnectCorrectnessTest` (line 4). It le
         await()
             .atMost(Duration.ofSeconds(10))
             .until(() -> fleet.countAtLeast(node.parts().feed().position().sequence()) == CLIENTS);
+        long droppedAt = node.parts().feed().position().sequence();
         node.parts().limit().dropAll();
-        Thread.sleep(300);
+        // Changes keep coming while the clients reconnect, so they resume into a moving feed.
+        await()
+            .atMost(Duration.ofSeconds(10))
+            .until(
+                () -> node.parts().feed().position().sequence() >= droppedAt + CHANGES_AFTER_DROP);
+        // Pausing waits for a tick already running, so no change can follow the snapshot.
         node.parts().simulator().pause();
         SeatMapSnapshot store = node.parts().store().snapshot();
         await()
@@ -100,8 +125,9 @@ This is the `import static` line from `ReconnectCorrectnessTest` (line 4). It le
 
 - `await().atMost(Duration.ofSeconds(10)).until(() -> fleet.countAtLeast(20) == CLIENTS)` waits until all ten clients have applied at least 20 changes. `countAtLeast(20)` counts the clients whose map has reached sequence 20. This makes sure that the on-sale is really changing seats, and that every client is following, before the first drop.
 - `node.parts().limit().dropAll()` closes every connection from the server's side. The second wait is `fleet.countAtLeast(node.parts().feed().position().sequence()) == CLIENTS`: it waits until every client has reached the position the feed has *now*. The lambda reads the feed's position again on every poll, so the target moves with the on-sale; the wait ends when every client has caught up at some poll. That proves each client reconnected and resumed.
-- After the second drop the test pauses the on-sale, takes the store's snapshot, and the third wait is `fleet.countAtLeast(store.position().sequence()) == CLIENTS`: every client has reached the sequence of that snapshot. Then `fleet.stop()` and the assertions on each client's map follow (`tests-transports-walkthrough.md`).
-- The three waits all have a 10-second ceiling. Healthy runs take about two seconds for the whole test (the whole class took 2.161 seconds for its three delivery methods in the run for these notes).
+- Before the second drop the test notes the feed's sequence in `droppedAt`. The third wait is on the feed, not on the clients: `node.parts().feed().position().sequence() >= droppedAt + CHANGES_AFTER_DROP` holds once 50 more changes have been published, so the clients reconnect while changes are still coming. It replaces a fixed 300-millisecond sleep that did the same job by hoping.
+- Then the test pauses the on-sale and takes the store's snapshot. `pause()` waits for a tick that is already running to finish, so no change can be published after the snapshot. The fourth wait is `fleet.countAtLeast(store.position().sequence()) == CLIENTS`: every client has reached the sequence of that snapshot. Then `fleet.stop()` and the assertions on each client's map follow (`tests-transports-walkthrough.md`).
+- The four waits all have a 10-second ceiling. Healthy runs take about two seconds for the whole test (the whole class took 1.948 seconds for its three delivery methods in the run for these notes).
 
 ### The sleeps that remain
 
@@ -109,11 +135,11 @@ This is the `import static` line from `ReconnectCorrectnessTest` (line 4). It le
 | --- | --- | --- |
 | `FeedHttpServerTest` line 72 | 200 ms | Lets a long poll reach the server and start waiting before the test publishes the change that should wake it. |
 | `FeedHttpServerTest` line 133 | 200 ms | Lets the first long poll take its slot in the connection limit before the second request is sent. |
-| `SeatFeedTest` line 92 | 50 ms | Lets a long poll started on another thread begin to wait before the test publishes. |
-| `SeatFeedTest` line 121 | 20 s ceiling | The body of a thread that stands in for a writer stuck in a write; it ends when the test interrupts it. |
-| `SeatFeedTest` line 127 | 100 ms | Makes the first writer's write older than the stuck-writer timeout (50 ms) while the second writer's is new. |
-| `WebSocketServerTest` line 56 | 500 ms | Gives the idle server time to send more pings, to prove the connection stays open. |
-| `ReconnectCorrectnessTest` line 33 | 300 ms | Lets the clients start reconnecting after the second drop before the on-sale is paused. |
+| `SeatFeedTest` line 95 | 50 ms | Lets a long poll started on another thread begin to wait before the test publishes. |
+| `SeatFeedTest` line 125 | 20 s ceiling | The body of a thread that stands in for a writer stuck in a write; it ends when the test interrupts it. |
+| `WebSocketServerTest` line 57 | 500 ms | Gives the idle server time to send more pings, to prove the connection stays open. |
+
+Two sleeps were removed in version 1.1.0 because their result depended on the machine's speed. The stuck-writer test no longer sleeps 100 ms to age a write: it passes the moment of the check to `SeatFeed` itself (`tests-feed-walkthrough.md`). The reconnect test no longer sleeps 300 ms after the second drop: it waits for 50 more changes, as shown above.
 
 These are the tests that depend on real time, and `tests-feed-walkthrough.md`, `tests-transports-walkthrough.md` and `tests-other-packages-walkthrough.md` say more about each. A sleep that only gives the other side a head start can, on a very slow machine, be too short; the tests then either pass anyway (a long poll that arrives late still gets the change) or fail with a message, so the cost is a rare red run, never a wrong green one.
 
@@ -131,7 +157,7 @@ All ran in a scratch copy on 11 November 2026.
 grep -rn "await()" src/test
 ```
 
-   Output: five lines: `SeatStoreTest.java:93` (the JDK latch, not Awaitility), `WebSocketServerTest.java:119` and `ReconnectCorrectnessTest.java` lines 27, 29 and 36, each with its folder in front.
+   Output: eight lines: `OnSaleSimulatorTest.java` lines 62 and 112 (the second is the JDK latch, not Awaitility), `WebSocketServerTest.java:147`, `SeatStoreTest.java:93` (the JDK latch again) and `ReconnectCorrectnessTest.java` lines 29, 31, 37 and 44, each with its folder in front.
 
 2. List the sleeps:
 
@@ -139,15 +165,15 @@ grep -rn "await()" src/test
 grep -rn "Thread.sleep" src/test
 ```
 
-   Output: seven lines, in the files named in the table above.
+   Output: five lines, in the files named in the table above.
 
-3. Run the two classes that wait:
+3. Run the three classes that wait:
 
 ```
-./gradlew --offline cleanTest test --tests '*ReconnectCorrectnessTest' --tests '*WebSocketServerTest'
+./gradlew --offline cleanTest test --tests '*ReconnectCorrectnessTest' --tests '*WebSocketServerTest' --tests '*OnSaleSimulatorTest'
 ```
 
-   Output: nine `PASSED` lines (three delivery methods and six WebSocket tests), then `BUILD SUCCESSFUL`.
+   Output: fifteen `PASSED` lines (three delivery methods, eight WebSocket tests and four on-sale tests), then `BUILD SUCCESSFUL`.
 
 4. See the library on the classpath:
 

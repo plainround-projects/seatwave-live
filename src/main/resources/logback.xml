@@ -1,5 +1,5 @@
 <configuration>
-  <!-- One line per request with its correlation id, which is also the instance of any problem body. -->
+  <!-- No line per request: at INFO only failures are written (an unexpected error, a failed accept), and an HTTP request's lines carry its correlation id, which is also the instance of any problem body. -->
   <!-- Log lines go to standard error, so a tool's report on standard output stays clean. -->
   <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
     <target>System.err</target>

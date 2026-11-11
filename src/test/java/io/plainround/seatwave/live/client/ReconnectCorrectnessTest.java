@@ -15,6 +15,8 @@ import org.junit.jupiter.params.provider.EnumSource;
 class ReconnectCorrectnessTest {
 
   private static final int CLIENTS = 10;
+  // About a quarter of a second of the test on-sale's 200 actions per second.
+  private static final int CHANGES_AFTER_DROP = 50;
 
   @ParameterizedTest
   @EnumSource(DeliveryMethod.class)
@@ -29,8 +31,14 @@ class ReconnectCorrectnessTest {
         await()
             .atMost(Duration.ofSeconds(10))
             .until(() -> fleet.countAtLeast(node.parts().feed().position().sequence()) == CLIENTS);
+        long droppedAt = node.parts().feed().position().sequence();
         node.parts().limit().dropAll();
-        Thread.sleep(300);
+        // Changes keep coming while the clients reconnect, so they resume into a moving feed.
+        await()
+            .atMost(Duration.ofSeconds(10))
+            .until(
+                () -> node.parts().feed().position().sequence() >= droppedAt + CHANGES_AFTER_DROP);
+        // Pausing waits for a tick already running, so no change can follow the snapshot.
         node.parts().simulator().pause();
         SeatMapSnapshot store = node.parts().store().snapshot();
         await()

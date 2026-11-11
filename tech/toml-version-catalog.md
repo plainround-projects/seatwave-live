@@ -6,7 +6,7 @@
 
 ## Why this repository uses it
 
-The README says "Every version is exact", and the first line of the catalog says the same. One file means one place to read, one place to change and one place to check against the vulnerability database. The build file then contains no version number at all, except the Java language level 25 and the project's own `1.0.0`. This repository has a short catalog because the feed is built on the JDK: no web framework, no database and no WebSocket library, only a result type, a JSON library, a logging pair and the test and build tools.
+The README says "Every version is exact", and the first line of the catalog says the same. One file means one place to read, one place to change and one place to check against the vulnerability database. The build file then contains no version number at all, except the Java language level 25 and the project's own `1.1.0`. This repository has a short catalog because the feed is built on the JDK: no web framework, no database and no WebSocket library, only a result type, a JSON library, a logging pair and the test and build tools.
 
 ## Where it appears
 

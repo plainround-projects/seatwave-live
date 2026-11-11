@@ -23,8 +23,9 @@ services:
     volumes:
       - .:/work
       - gradle-home:/root/.gradle
-    # 1,000 clients and 1,000 server connections need about 2,100 descriptors per process; this
-    # raises the container's own limit only, not the host's.
+    # The feed runs in a process of its own: 1,000 connections need about 1,100 descriptors in it
+    # (1,022 to 1,032 were open in the measured runs) and about as many in the clients' process.
+    # This raises the container's own limit only, not the host's.
     ulimits:
       nofile:
         soft: 65536

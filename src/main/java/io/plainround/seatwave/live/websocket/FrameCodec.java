@@ -26,6 +26,7 @@ public final class FrameCodec {
   private static final int LARGEST_SIXTEEN_BIT = 0xFFFF;
   private static final int MASK_KEY_BYTES = 4;
   private static final int CONTROL_OPCODES = 0x8;
+  private static final int CONTINUATION = 0x0;
   private static final int BYTE = 0xFF;
   private static final int BITS_PER_BYTE = 8;
   private static final int CLOSE_CODE_BYTES = 2;
@@ -76,7 +77,8 @@ public final class FrameCodec {
    * @param in the connection's input
    * @param maxPayload the largest payload accepted
    * @return the frame, unmasked
-   * @throws ProtocolViolation if the frame is unmasked, fragmented, reserved, or too large
+   * @throws ProtocolViolation if the frame is unmasked, fragmented, reserved, of an unknown opcode,
+   *     or too large
    * @throws EOFException if the peer closed the connection
    * @throws IOException if reading fails
    */
@@ -88,7 +90,18 @@ public final class FrameCodec {
       throw new ProtocolViolation(
           CloseCode.PROTOCOL_ERROR, "reserved bits set without an extension");
     }
-    if ((first & FIN) == 0 || opcode == 0) {
+    if (!isDefined(opcode)) {
+      // RFC 6455, section 5.2: an unknown opcode fails the connection; section 7.4.1 names 1002,
+      // protocol error, for that. 1003 is only for a defined kind of data the feed does not accept.
+      throw new ProtocolViolation(CloseCode.PROTOCOL_ERROR, "unknown opcode " + opcode);
+    }
+    if (opcode == CONTINUATION || (opcode >= CONTROL_OPCODES && (first & FIN) == 0)) {
+      // The feed never accepts a first fragment, so a continuation has nothing to continue, and
+      // control frames must never be fragmented (section 5.5).
+      throw new ProtocolViolation(
+          CloseCode.PROTOCOL_ERROR, "a continuation or a fragmented control frame");
+    }
+    if ((first & FIN) == 0) {
       throw new ProtocolViolation(
           CloseCode.UNSUPPORTED_DATA, "fragmented messages are not accepted");
     }
@@ -128,6 +141,15 @@ public final class FrameCodec {
       return NO_STATUS_RECEIVED;
     }
     return ((payload[0] & BYTE) << BITS_PER_BYTE) | (payload[1] & BYTE);
+  }
+
+  private static boolean isDefined(int opcode) {
+    return opcode == CONTINUATION
+        || opcode == Frame.TEXT
+        || opcode == Frame.BINARY
+        || opcode == Frame.CLOSE
+        || opcode == Frame.PING
+        || opcode == Frame.PONG;
   }
 
   private static int readByte(InputStream in) throws IOException {

@@ -2,7 +2,7 @@
 
 ## What it is
 
-This file walks through every test file of three test packages, in `src/test/java/io/plainround/seatwave/live/`: `http` (2 files, 16 results), `websocket` (3 files, 14 results) and `client` (3 files, 11 results). Together they prove that the three delivery methods work over real sockets: long polling and server-sent events through the JDK's HTTP server, WebSockets through the project's own server, and that a client whose connection is cut ends with exactly the seat map the store has.
+This file walks through every test file of three test packages, in `src/test/java/io/plainround/seatwave/live/`: `http` (2 files, 17 results), `websocket` (3 files, 17 results) and `client` (5 files, 14 results). Together they prove that the three delivery methods work over real sockets: long polling and server-sent events through the JDK's HTTP server, WebSockets through the project's own server, and that a client whose connection is cut ends with exactly the seat map the store has.
 
 Some words first, because these tests speak the protocols directly.
 
@@ -12,17 +12,19 @@ Some words first, because these tests speak the protocols directly.
 
 ## Why this repository uses it
 
-A feed that is right in memory but wrong on the wire is wrong. These tests send the exact bytes a browser or a `curl` would send, read the exact bytes the server writes, and check them: the headers, the event format, the status codes, the WebSocket framing rules. They also run the real clients that the comparison uses, against a real node, and cut their connections. The whole of this part takes about 5.5 seconds of the build (`FeedHttpServerTest` 2.5 s, `ReconnectCorrectnessTest` 2.2 s, `WebSocketServerTest` 0.7 s, the rest under 0.2 s).
+A feed that is right in memory but wrong on the wire is wrong. These tests send the exact bytes a browser or a `curl` would send, read the exact bytes the server writes, and check them: the headers, the event format, the status codes, the WebSocket framing rules. They also run the real clients that the comparison uses, against a real node, and cut their connections. The whole of this part takes about 5.3 seconds of the build (`FeedHttpServerTest` 2.5 s, `ReconnectCorrectnessTest` 1.9 s, `WebSocketServerTest` 0.7 s, the rest under 0.2 s).
 
 | File | Results | What it proves |
 | --- | --- | --- |
 | `http/EventStreamRouteTest.java` | 5 | The event stream: format, resume by `Last-Event-ID`, reload, heartbeat, a bad header. |
-| `http/FeedHttpServerTest.java` | 11 | The seat map, long polls, bad requests, the connection limit, health, metrics, the page, the admin routes. |
-| `websocket/FrameCodecTest.java` | 4 | The WebSocket frame format: lengths, masking, refusals. |
+| `http/FeedHttpServerTest.java` | 12 | The seat map, long polls, bad requests, the connection limit, health, metrics, the page and what its policy allows, the admin routes. |
+| `websocket/FrameCodecTest.java` | 5 | The WebSocket frame format: lengths, masking, refusals and their close codes. |
 | `websocket/HandshakeTest.java` | 4 | The opening handshake and each way to refuse it. |
-| `websocket/WebSocketServerTest.java` | 6 | The WebSocket server with the JDK's client and with raw bytes. |
+| `websocket/WebSocketServerTest.java` | 8 | The WebSocket server with the JDK's client and with raw bytes, a client's ping included. |
 | `client/BackoffTest.java` | 4 | The reconnect wait: random, doubling ceiling, capped. |
 | `client/ClientSeatMapTest.java` | 4 | The client's map applies, ignores or refuses each change. |
+| `client/EventStreamConnectionTest.java` | 2 | The client reads `data` fields as the event-stream standard says. |
+| `client/FeedClientTest.java` | 1 | A failed reload of the seat map is tried again, never followed from the old position. |
 | `client/ReconnectCorrectnessTest.java` | 3 | After every connection is dropped twice, every client's map equals the store's. |
 
 ## Where it appears
@@ -39,7 +41,7 @@ All files are in the test source set and run in `./gradlew test` and `check`. Th
 5. **Assert what must hold under every schedule.** The reconnect test cannot know how many changes happen while a client is away. It asserts that, at the end, each client's map equals the store's map, there is no gap, and the reconnect counter is at least what two drops cause.
 6. **A safety net.** Every test has the JUnit default timeout of 60 seconds (`junit.md`), and `Raw` sets a 5-second read timeout on its socket, so a test that waits for bytes that never come fails instead of hanging.
 
-**Which tests rely on real time.** The hold time of a long poll is real: `endsAHeldLongPollWithNoChangesAtTheEndOfTheHold` waits the full 2-second hold (`TestSettings.small()` sets it) and is the slowest test of `http`. `holdsALongPollUntilTheNextChange` and `refusesAConnectionOverTheLimitWithRetryAfter` each sleep 200 ms to let a request reach the server. `sendsACommentLineAsAHeartbeatWhenNothingHappens` and `pingsAnIdleClientThatAnswersAndKeepsItOpen` use a 100 ms heartbeat, so the server's own timer drives them; the second sleeps 500 ms. `ReconnectCorrectnessTest` sleeps 300 ms once and runs an on-sale at real speed (200 actions per second). `BackoffTest`, `ClientSeatMapTest`, `FrameCodecTest` and `HandshakeTest` use no time at all.
+**Which tests rely on real time.** The hold time of a long poll is real: `endsAHeldLongPollWithNoChangesAtTheEndOfTheHold` waits the full 2-second hold (`TestSettings.small()` sets it) and is the slowest test of `http`. `holdsALongPollUntilTheNextChange` and `refusesAConnectionOverTheLimitWithRetryAfter` each sleep 200 ms to let a request reach the server. `sendsACommentLineAsAHeartbeatWhenNothingHappens` and `pingsAnIdleClientThatAnswersAndKeepsItOpen` use a 100 ms heartbeat, so the server's own timer drives them; the second sleeps 500 ms. `ReconnectCorrectnessTest` runs an on-sale at real speed (200 actions per second) and waits, with Awaitility, for conditions on it; it no longer sleeps. `BackoffTest`, `ClientSeatMapTest`, `FrameCodecTest` and `HandshakeTest` use no time at all.
 
 ## Walkthrough of this repository's use
 
@@ -455,6 +457,40 @@ The helpers, used by every test:
 
 ```java
   @Test
+  void servesAPageThatNeedsNothingItsPolicyBlocksAndNamesTheRealWebSocketPort() throws Exception {
+    String webSocketOrigin = "ws://127.0.0.1:" + node.webSocketPort();
+
+    HttpResponse<String> page = get("/");
+    HttpResponse<String> style = get("/live-seat-map.css");
+    String script = get("/live-seat-map.js").body();
+
+    // default-src 'self' blocks inline style and script, so the page must have none.
+    assertThat(page.body()).doesNotContain("<style", "style=", "<script>");
+    assertThat(page.body())
+        .contains("<link rel=\"stylesheet\" href=\"/live-seat-map.css\">")
+        .contains("<meta name=\"seatwave-websocket\" content=\"" + webSocketOrigin + "\">");
+    assertThat(page.headers().firstValue("Content-Security-Policy"))
+        .hasValue("default-src 'self'; connect-src 'self' " + webSocketOrigin);
+    assertThat(style.headers().firstValue("Content-Type")).hasValue("text/css; charset=utf-8");
+    assertThat(style.body()).contains("#map span.h");
+    assertThat(script).contains("WEBSOCKET_ORIGIN").doesNotContain("8091");
+  }
+```
+
+This test proves the three fixes of the browser page of version 1.1.0 without a browser, by reading what the server sends.
+
+- `webSocketOrigin` is the address the page must name: `ws://127.0.0.1:` and the node's real WebSocket port, which the system chose because the test settings ask for port 0.
+- Three requests: the page, its style file and its script.
+- `doesNotContain("<style", "style=", "<script>")`: the page has no inline style element, no inline style attribute and no inline script. The comment says why that matters: the policy `default-src 'self'` blocks all three, and in version 1.0.0 it blocked the page's own `<style>` element, so the seat map was invisible.
+- The page links its style file, and its `meta` element carries the real WebSocket origin: the server replaced the mark `@websocket-origin@`.
+- `hasValue(...)` checks the whole policy header: the WebSocket origin it allows is exactly the one the page was told about.
+- The style file is served as `text/css` and holds the seat rules (`#map span.h` is the held-seat color).
+- The script reads the origin from the page (`WEBSOCKET_ORIGIN`) and has no port number of its own: `8091`, the port version 1.0.0 had written into it, appears nowhere.
+
+What the test cannot see is the browser itself: whether it applies the style and opens the WebSocket. I checked that by hand in a browser (`web-page-and-logging.md`, "Try it yourself").
+
+```java
+  @Test
   void pausesResumesDropsAndSettlesThroughTheAdminRoutes() throws Exception {
     assertThat(post("/admin/pause").body()).isEqualTo("{\"onSale\":\"paused\"}");
     assertThat(post("/admin/resume").body()).isEqualTo("{\"onSale\":\"running\"}");
@@ -581,11 +617,36 @@ class FrameCodecTest {
 
 Six ways to break the rules, each refused with the right reason.
 1. `{(byte) 0x89, 0}` is a ping with the mask bit off: refused with a `ProtocolViolation` whose message contains `masked`.
-2. `clientFrame(Frame.TEXT, "a")` has the FIN bit off, so it is the first piece of a fragmented message: `fragmented`.
+2. `clientFrame(Frame.TEXT, "a")` has the FIN bit off, so it is the first piece of a fragmented text message: `fragmented`. That is legal WebSocket that the feed does not accept, so its close code is 1003.
 3. `clientFrame(0xC0 | Frame.TEXT, "a")` sets a reserved bit: `reserved`.
 4. A text frame with 200 bytes when only 125 are allowed: `larger`.
 5. A ping with 126 bytes: control frames may carry at most 125: `control`.
 6. A single byte `0x81`: the stream ends before the second byte, so the codec throws `EOFException`, not a violation.
+
+```java
+  @Test
+  void refusesAnUnknownOpcodeAndAStrayContinuationAsProtocolErrors() {
+    for (int opcode : new int[] {0x3, 0x7, 0xB, 0xF}) {
+      assertThatThrownBy(() -> FrameCodec.read(input(clientFrame(0x80 | opcode, "a")), 125))
+          .isInstanceOf(ProtocolViolation.class)
+          .hasMessageContaining("unknown opcode")
+          .extracting(violation -> ((ProtocolViolation) violation).closeCode())
+          .isEqualTo(CloseCode.PROTOCOL_ERROR);
+    }
+    assertThatThrownBy(() -> FrameCodec.read(input(clientFrame(0x80, "a")), 125))
+        .extracting(violation -> ((ProtocolViolation) violation).closeCode())
+        .isEqualTo(CloseCode.PROTOCOL_ERROR);
+    assertThatThrownBy(() -> FrameCodec.read(input(clientFrame(Frame.PING, "a")), 125))
+        .extracting(violation -> ((ProtocolViolation) violation).closeCode())
+        .isEqualTo(CloseCode.PROTOCOL_ERROR);
+  }
+```
+
+This test is new in version 1.1.0. It checks the close code, not only the message: `extracting(...)` takes a value out of the thrown exception, here `closeCode()` (the cast `(ProtocolViolation) violation` is needed because AssertJ hands the lambda a plain `Throwable`), and `isEqualTo` compares it.
+
+- The loop tries four of the ten opcodes RFC 6455 reserves (3, 7, 11 and 15, the two ends of each reserved range), each with FIN set. Each is refused with the message `unknown opcode` and `CloseCode.PROTOCOL_ERROR`, 1002. Section 5.2 of the RFC says an unknown opcode must fail the connection, and section 7.4.1 names 1002 for that. Version 1.0.0 passed these frames on, and the session closed with 1003, "unsupported data", the code for a valid kind of data the endpoint does not take.
+- `clientFrame(0x80, "a")` is FIN with opcode 0, a continuation. The feed never accepts a first fragment, so there is nothing to continue: a protocol error, 1002.
+- `clientFrame(Frame.PING, "a")` is a ping without FIN, a fragmented control frame. Section 5.5 forbids that: 1002 too.
 
 ```java
   @Test
@@ -595,14 +656,13 @@ Six ways to break the rules, each refused with the right reason.
     assertThat(frame.payload()).hasSize(300);
     assertThat(FrameCodec.closeCodeOf(new byte[] {0x03, (byte) 0xE9})).isEqualTo(1001);
     assertThat(FrameCodec.closeCodeOf(new byte[0])).isEqualTo(1005);
-    assertThat(ProtocolViolationCode.of(new ProtocolViolation(CloseCode.TOO_BIG, "x")))
-        .isEqualTo(1009);
+    assertThat(new ProtocolViolation(CloseCode.TOO_BIG, "x").closeCode().code()).isEqualTo(1009);
   }
 ```
 
 - A 300-byte masked frame is read whole (`hasSize(300)`), which exercises the 16-bit length path.
 - `closeCodeOf` reads the status from a close payload: bytes `0x03, 0xE9` are 1,001 ("going away"). An empty payload is reported as 1,005, the code for "no status received".
-- `ProtocolViolationCode.of(...)` (the small class at the end of the file) reads `closeCode().code()` of a violation made with `CloseCode.TOO_BIG`: 1,009.
+- `new ProtocolViolation(CloseCode.TOO_BIG, "x").closeCode().code()` reads the number of a violation made with `CloseCode.TOO_BIG`: 1,009. Version 1.0.0 called a small private class at the end of the file for this one expression; it added nothing, so version 1.1.0 removed it.
 
 ```java
   private static ByteArrayInputStream input(byte[] bytes) {
@@ -629,17 +689,10 @@ Six ways to break the rules, each refused with the right reason.
     frame.get(bytes);
     return bytes;
   }
-
-  private static final class ProtocolViolationCode {
-    static int of(ProtocolViolation violation) {
-      return violation.closeCode().code();
-    }
-  }
 ```
 
 - `input(bytes)` wraps bytes in a stream.
 - `clientFrame(firstByte, text)` builds a valid masked client frame: it takes the text's UTF-8 bytes, allocates a buffer of `payload.length + 14` bytes (the largest header this helper writes is 2 + 2 + 4 bytes, so there is room to spare), puts the first byte, then the length with the mask bit `0x80` set (using the 126 form with a two-byte length for payloads above 125), then the mask key, then each payload byte XORed with the key byte `MASK[index % 4]`. `frame.flip()` and `frame.get(bytes)` copy exactly the bytes written into a right-sized array.
-- `ProtocolViolationCode` is a private nested class with one static method. It only exists to read the code of a violation in the test above.
 
 ### `websocket/HandshakeTest.java`
 
@@ -783,6 +836,7 @@ Eight ways to be refused, each with its status:
 ```java
 package io.plainround.seatwave.live.websocket;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -808,6 +862,7 @@ class WebSocketServerTest {
   private static final Duration WAIT = Duration.ofSeconds(5);
 ```
 
+- `import static java.nio.charset.StandardCharsets.US_ASCII;` lets the class write `US_ASCII`, the 7-bit text encoding, without the class name.
 - `java.net.http.WebSocket` is the JDK's WebSocket **client**. `WebSocket.Listener` is the interface whose methods the client calls when something arrives. `LinkedBlockingQueue` is a queue that one thread fills and another waits on. `CompletionStage` is the JDK's type for "a result that comes later".
 - `WAIT` is five seconds, the ceiling for every wait in this class.
 
@@ -826,9 +881,21 @@ class WebSocketServerTest {
         .buildAsync(uri, recorder)
         .get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
   }
+
+  // A client frame with a short payload, masked as RFC 6455 requires of every client frame.
+  private static byte[] maskedFrame(int firstByte, byte[] payload) {
+    byte[] mask = {0x11, 0x22, 0x33, 0x44};
+    ByteBuffer frame = ByteBuffer.allocate(2 + mask.length + payload.length);
+    frame.put((byte) firstByte).put((byte) (0x80 | payload.length)).put(mask);
+    for (int index = 0; index < payload.length; index++) {
+      frame.put((byte) (payload[index] ^ mask[index % mask.length]));
+    }
+    return frame.array();
+  }
 ```
 
 - `open(...)` builds the address `ws://127.0.0.1:<port>/v1/events/1/seat-changes/socket?after=<position>` and opens a WebSocket with `http.newWebSocketBuilder().buildAsync(uri, recorder)`. `.get(WAIT.toMillis(), TimeUnit.MILLISECONDS)` waits at most five seconds for the handshake to finish. The returned `WebSocket` is the client's end.
+- `maskedFrame(firstByte, payload)` builds one client frame by hand, for the tests that must send bytes the JDK client would never send. The comment says why it masks: RFC 6455 requires every client frame to be masked, and an unmasked one would be refused for that reason before the test's real question is asked. The buffer has room for the 2 header bytes, the 4 mask bytes and the payload. `frame.put(...)` returns the buffer itself, so three puts chain on one line: the first byte, the length with the mask bit `0x80`, and the key. The loop XORs each payload byte with a key byte. The payload must be at most 125 bytes, the short length form, which is all these tests need. `frame.array()` returns the whole buffer, which is exactly full.
 
 ```java
   private static String handshake(String query, String extra) {
@@ -990,6 +1057,43 @@ class WebSocketServerTest {
 - `unmasked` is a raw connection that completes a handshake (`readUntil` reads the `101` head), then sends the two bytes `0x89, 0`: a ping with the mask bit off. The server must close with a protocol error.
 - A second client, `chatty`, is a normal JDK client that sends the text `"hello"`. The JDK masks it correctly, but this feed accepts no messages from clients, so the server closes with status 1,003 (unsupported data).
 - `unmasked.input().readNBytes(4)` reads the server's reply: `0x88, 2, 0x03, 0xEA` is a close frame with status 1,002 (protocol error). `recorder.take()` is `close 1003`.
+
+```java
+  @Test
+  void closesAClientThatSendsAnUnknownOpcodeWithProtocolError() throws Exception {
+    try (LiveFeedNode node = LiveFeedNode.start(TestSettings.small(), Clock.systemUTC());
+        Raw client = Raw.connect(node.webSocketPort())) {
+      client.send(handshake("?after=" + node.parts().feed().position().written(), ""));
+      client.readUntil("\r\n\r\n");
+
+      client.sendBytes(maskedFrame(0x80 | 0x3, new byte[0]));
+
+      assertThat(client.input().readNBytes(4)).containsExactly(0x88, 2, 0x03, 0xEA);
+    }
+  }
+```
+
+- A raw client completes a handshake, then sends one masked frame with FIN set and opcode 3, which RFC 6455 reserves and does not define, with no payload.
+- The server must fail the connection with a protocol error: the four bytes `0x88, 2, 0x03, 0xEA` are a close frame (`0x88`), a 2-byte payload, and status `0x03EA`, which is 1,002. Version 1.0.0 answered 1,003 (`0x03, 0xEB`) here, and this test failed against it.
+
+```java
+  @Test
+  void answersAClientPingWithAPongCarryingTheSamePayload() throws Exception {
+    try (LiveFeedNode node = LiveFeedNode.start(TestSettings.small(), Clock.systemUTC());
+        Raw client = Raw.connect(node.webSocketPort())) {
+      client.send(handshake("?after=" + node.parts().feed().position().written(), ""));
+      client.readUntil("\r\n\r\n");
+
+      client.sendBytes(maskedFrame(0x80 | Frame.PING, "are you there".getBytes(US_ASCII)));
+
+      assertThat(client.input().readNBytes(2)).containsExactly(0x80 | Frame.PONG, 13);
+      assertThat(new String(client.input().readNBytes(13), US_ASCII)).isEqualTo("are you there");
+    }
+  }
+```
+
+- The client sends a masked ping with the 13-byte payload `are you there`. RFC 6455 says the answer to a ping is a pong with the same payload.
+- `readNBytes(2)` reads the pong's header: `0x80 | Frame.PONG` (FIN and opcode 10, which is `0x8A`) and the length 13, unmasked because a server's frames are never masked. The next 13 bytes are the payload, which must be the same text. Before version 1.1.0 no test sent a ping from the client, so this half of the heartbeat was untested.
 
 ```java
   @Test
@@ -1180,6 +1284,263 @@ class ClientSeatMapTest {
 
 - A seat `Z-9`, a state `taken`, a position `eleven`, and a snapshot with 3 states for 5 seats are all malformed. Each throws `IllegalArgumentException`: bad input is refused, not guessed at.
 
+### `client/EventStreamConnectionTest.java`
+
+This test is new in version 1.1.0. It checks how the Java client reads the event-stream format, against two rules of the WHATWG standard that version 1.0.0 got wrong. The feed's own server writes events in one fixed shape, so the tests use a tiny server of their own that sends exactly the bytes the test chooses.
+
+```java
+package io.plainround.seatwave.live.client;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.sun.net.httpserver.HttpServer;
+import io.plainround.seatwave.live.feed.FeedPosition;
+import io.plainround.seatwave.live.wire.FeedJson;
+import io.plainround.seatwave.live.wire.MessageView;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class EventStreamConnectionTest {
+
+  private static final Duration WAIT = Duration.ofSeconds(5);
+  private static final FeedPosition START = new FeedPosition("0000abcd", 10);
+
+```
+
+- `com.sun.net.httpserver.HttpServer` is the JDK's HTTP server, the same one the feed runs on; here it is a stand-in server that sends one fixed stream.
+- `MessageView` is the record the client turns each event's JSON into. `FeedJson` is the codec.
+- `WAIT` (5 seconds) is the client's timeout for the stream's response headers.
+- `START` is the position the client follows from: stream `0000abcd`, sequence 10. The stand-in server ignores it; the client needs one to build its request.
+
+```java
+  @Test
+  void readsADataFieldWithOrWithoutTheSpaceAfterTheColon() throws Exception {
+    String stream =
+        "data:{\"type\":\"seat\",\"position\":\"0000abcd.11\",\"seat\":\"A-1\",\"state\":\"held\","
+            + "\"changedAt\":\"2026-11-11T10:00:00Z\"}\n\n"
+            + "data: {\"type\":\"seat\",\"position\":\"0000abcd.12\",\"seat\":\"A-2\","
+            + "\"state\":\"held\",\"changedAt\":\"2026-11-11T10:00:00Z\"}\n\n";
+
+    List<MessageView> received = follow(stream);
+
+    assertThat(received)
+        .extracting(MessageView::position)
+        .containsExactly("0000abcd.11", "0000abcd.12");
+  }
+```
+
+- The stream holds two events, each ended by a blank line (`\n\n`). The first is written `data:{...}`, with no space after the colon; the second `data: {...}`, with one space. The standard allows both: one space after the colon is removed if it is there, and none is needed.
+- `follow(stream)` serves the stream and returns every message the client handed to its sink.
+- `extracting(MessageView::position)` takes the `position` of each message, and `containsExactly` checks both arrived, in order. Version 1.0.0 looked only for `data: ` with the space, so it skipped the first event and this test failed.
+
+```java
+  @Test
+  void joinsTheDataLinesOfOneEventWithALineFeed() throws Exception {
+    // The line feed between the two data lines falls inside a JSON string, where JSON forbids it:
+    // a browser's JSON.parse refuses this event, and so must the client. Joined without the line
+    // feed, the two halves would wrongly make a valid change.
+    String stream =
+        "data: {\"type\":\"seat\",\"position\":\"0000abcd.11\",\"seat\":\"A-\n"
+            + "data: 1\",\"state\":\"held\",\"changedAt\":\"2026-11-11T10:00:00Z\"}\n\n";
+
+    List<MessageView> received = follow(stream);
+
+    assertThat(received).isEmpty();
+  }
+```
+
+- One event with two data lines. The standard joins the values of an event's data lines with a line feed. Here the split falls inside the JSON string `"A-1"`, so the joined text has a line feed inside a string, which JSON forbids. A browser's `EventSource` gives `JSON.parse` that text, and it fails; the comment says the client must agree.
+- `assertThat(received).isEmpty()`: the client refused the event. (It cannot parse it, so `follow` ends the connection, and the client would reconnect.) Version 1.0.0 joined the lines with nothing between them, turned the two halves into the valid text `"A-1"`, and handed the sink a change no browser would ever see: this test failed against it.
+- Joined correctly, a split between two JSON tokens would parse in both versions, so a split inside a string is the case that tells them apart.
+
+```java
+  // Serves one event stream on the loopback address and follows it to its end.
+  private static List<MessageView> follow(String stream) throws IOException, InterruptedException {
+    HttpServer server =
+        HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 1);
+    server.createContext(
+        "/",
+        exchange -> {
+          byte[] body = stream.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+          exchange.sendResponseHeaders(200, body.length);
+          try (OutputStream out = exchange.getResponseBody()) {
+            out.write(body);
+          }
+        });
+    server.start();
+    Recorder recorder = new Recorder();
+    try (HttpClient http = HttpClient.newHttpClient()) {
+      new EventStreamConnection(
+              http, new FeedEndpoints(server.getAddress().getPort(), 1), new FeedJson(), WAIT)
+          .follow(START, recorder);
+    } finally {
+      server.stop(0);
+    }
+    return recorder.received;
+  }
+```
+
+`follow` is the helper both tests use.
+
+- `HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 1)` makes a server on 127.0.0.1 with a free port (0) and an accept backlog of 1.
+- `createContext("/", exchange -> { ... })` answers every path with the same handler: the stream's UTF-8 bytes, the header `Content-Type: text/event-stream`, status 200 with the exact length, then the body. Closing the body stream ends the reply, so the client reads the events and then the end of the stream.
+- A new `EventStreamConnection` follows the stand-in server's port (the WebSocket port `1` is never used). `follow(START, recorder)` returns when the stream ends.
+- `finally { server.stop(0); }` stops the server at once, also when the client throws.
+
+```java
+  private static final class Recorder implements MessageSink {
+
+    private final List<MessageView> received = new ArrayList<>();
+
+    @Override
+    public void connected() {
+      // Nothing to record: the test looks only at the messages.
+    }
+
+    @Override
+    public Verdict accept(MessageView message) {
+      received.add(message);
+      return Verdict.CONTINUE;
+    }
+
+    @Override
+    public void heartbeat() {
+      // The streams in these tests carry no comments.
+    }
+  }
+}
+```
+
+`Recorder` is the sink. It keeps every message in `received` and always answers `Verdict.CONTINUE`. `connected` and `heartbeat` do nothing, and their comments say why.
+
+### `client/FeedClientTest.java`
+
+This test is new in version 1.1.0. It checks one path of `FeedClient.run`: a reload instruction, then a failed attempt to load the seat map.
+
+```java
+package io.plainround.seatwave.live.client;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.sun.net.httpserver.HttpServer;
+import io.plainround.seatwave.live.feed.FeedPosition;
+import io.plainround.seatwave.live.wire.FeedJson;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
+
+class FeedClientTest {
+
+  private static final Duration WAIT = Duration.ofSeconds(5);
+  private static final String OLD_MAP =
+      "{\"eventId\":1,\"position\":\"0000abcd.10\",\"sections\":1,\"seatsPerSection\":5,"
+          + "\"states\":\"aaaaa\"}";
+  private static final String NEW_MAP =
+      "{\"eventId\":1,\"position\":\"0000abcd.20\",\"sections\":1,\"seatsPerSection\":5,"
+          + "\"states\":\"hhaaa\"}";
+
+```
+
+- `AtomicInteger` counts the stand-in server's requests from its handler thread. `CopyOnWriteArrayList` is a list that is safe to add to from one thread and read from another.
+- `OLD_MAP` and `NEW_MAP` are two seat maps as the feed's `/seat-map` route writes them: one section of 5 seats, at positions `0000abcd.10` (all available) and `0000abcd.20` (two seats held).
+
+```java
+  @Test
+  void triesAFailedReloadAgainInsteadOfFollowingFromTheOldPosition() throws Exception {
+    // The seat map answers: the old map, then one failure, then the new map.
+    AtomicInteger requests = new AtomicInteger();
+    HttpServer server =
+        HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 1);
+    server.createContext(
+        "/",
+        exchange -> {
+          int request = requests.incrementAndGet();
+          if (request == 2) {
+            exchange.sendResponseHeaders(503, -1);
+            exchange.close();
+            return;
+          }
+          byte[] body = (request == 1 ? OLD_MAP : NEW_MAP).getBytes(StandardCharsets.UTF_8);
+          exchange.sendResponseHeaders(200, body.length);
+          try (OutputStream out = exchange.getResponseBody()) {
+            out.write(body);
+          }
+        });
+    server.start();
+    ReloadThenStop connection = new ReloadThenStop();
+    try (HttpClient http = HttpClient.newHttpClient()) {
+      FeedEndpoints endpoints = new FeedEndpoints(server.getAddress().getPort(), 1);
+      FeedClient client =
+          new FeedClient(
+              connection,
+              new SeatMapReader(http, endpoints, new FeedJson(), WAIT),
+              new Backoff(Duration.ofMillis(1), Duration.ofMillis(5), 1),
+              new AtomicBoolean(),
+              new ClientStats(10));
+
+      Thread running = Thread.ofVirtual().start(client);
+      running.join(WAIT);
+
+      assertThat(running.isAlive()).isFalse();
+      assertThat(connection.followedFrom)
+          .extracting(FeedPosition::written)
+          .containsExactly("0000abcd.10", "0000abcd.20");
+      assertThat(client.map().states()).isEqualTo("hhaaa");
+    } finally {
+      server.stop(0);
+    }
+  }
+```
+
+- The comment says what the stand-in seat-map server does: the first request gets the old map, the second gets status 503 with no body (`-1` means "no body"), every later one gets the new map.
+- `ReloadThenStop` (below) is a fake delivery method. A `FeedClient` is built around it, with a real `SeatMapReader` that reads the stand-in server, a backoff of 1 to 5 ms so the test is quick, delay recording off and room for 10 delays.
+- `Thread.ofVirtual().start(client)` runs the client; `join(WAIT)` waits for it to end, at most 5 seconds.
+- What happens: the client loads the old map (request 1) and follows from `0000abcd.10`. The fake method answers "reload". The client tries to load the map and gets the 503 (request 2). It must try again (request 3), get the new map, and follow from `0000abcd.20`; the fake method then stops it.
+- The checks: the client thread ended; the fake method was followed exactly twice, from `0000abcd.10` and then from `0000abcd.20`; the client's map is the new one. In version 1.0.0, after the failed load the client went on with its old map and followed from `0000abcd.10` again, so `followedFrom` was `.10, .10` and the test failed.
+
+```java
+  // The first follow is told to reload; the second records its position and stops the client.
+  private static final class ReloadThenStop implements FeedConnection {
+
+    private final List<FeedPosition> followedFrom = new CopyOnWriteArrayList<>();
+
+    @Override
+    public Ending follow(FeedPosition from, MessageSink sink) {
+      followedFrom.add(from);
+      if (followedFrom.size() == 1) {
+        return Ending.RELOAD;
+      }
+      Thread.currentThread().interrupt();
+      return Ending.DISCONNECTED;
+    }
+
+    @Override
+    public void abort() {
+      // Never silent in this test.
+    }
+  }
+}
+```
+
+`ReloadThenStop` is the fake method, described by its comment. `follow` records the position it was asked to follow from. The first time it returns `Ending.RELOAD`, as a server's reload message would. The second time it sets the thread's interrupt flag and returns `DISCONNECTED`; the client then sleeps its backoff, the sleep throws `InterruptedException` because of the flag, and `run` ends. `abort` is never called, because the test has no silence watchdog.
+
 ### `client/ReconnectCorrectnessTest.java`
 
 ```java
@@ -1200,9 +1561,12 @@ import org.junit.jupiter.params.provider.EnumSource;
 class ReconnectCorrectnessTest {
 
   private static final int CLIENTS = 10;
+  // About a quarter of a second of the test on-sale's 200 actions per second.
+  private static final int CHANGES_AFTER_DROP = 50;
 ```
 
 - `CLIENTS = 10` clients per delivery method.
+- `CHANGES_AFTER_DROP = 50` is how many changes the test lets the on-sale make after the second drop; the comment says that is about a quarter of a second at the test on-sale's 200 actions per second.
 
 ```java
   private static FleetPlan plan(DeliveryMethod method, LiveFeedNode node) {
@@ -1239,8 +1603,14 @@ class ReconnectCorrectnessTest {
         await()
             .atMost(Duration.ofSeconds(10))
             .until(() -> fleet.countAtLeast(node.parts().feed().position().sequence()) == CLIENTS);
+        long droppedAt = node.parts().feed().position().sequence();
         node.parts().limit().dropAll();
-        Thread.sleep(300);
+        // Changes keep coming while the clients reconnect, so they resume into a moving feed.
+        await()
+            .atMost(Duration.ofSeconds(10))
+            .until(
+                () -> node.parts().feed().position().sequence() >= droppedAt + CHANGES_AFTER_DROP);
+        // Pausing waits for a tick already running, so no change can follow the snapshot.
         node.parts().simulator().pause();
         SeatMapSnapshot store = node.parts().store().snapshot();
         await()
@@ -1272,17 +1642,17 @@ This is the test of the module's central promise, run once for each of the three
 4. **The first forced reconnect.** `node.parts().limit().dropAll()` runs the drop action of every open connection: for an event stream it interrupts the writer, for a WebSocket it closes the socket, for a held long poll it interrupts the handler. The clients' connections end.
 5. Each client notices, waits a random backoff (for the first attempt, between 0 and 20 ms in this plan), and connects again with the position of the **last change it applied** (`after=...`, or `Last-Event-ID` for an event stream). The server's catch-up gives it every change it missed, once, or tells it to reload.
 6. The next wait, `fleet.countAtLeast(node.parts().feed().position().sequence()) == CLIENTS`, reads the feed's position afresh at every check and waits until every client has reached it. That proves each client reconnected and caught up.
-7. **The second forced reconnect:** `dropAll()` again. `Thread.sleep(300);` lets the clients start reconnecting while the on-sale keeps changing seats, so changes really happen while they are away.
-8. `node.parts().simulator().pause()` stops the on-sale, and `node.parts().store().snapshot()` takes the store's seat map together with its position. From now on nothing changes.
+7. **The second forced reconnect.** `droppedAt` notes the feed's sequence, then `dropAll()` drops every connection again. The next wait is on the feed, not on the clients: it ends when 50 more changes have been published (`droppedAt + CHANGES_AFTER_DROP`), so changes really happen while the clients are away and reconnecting. Version 1.0.0 slept 300 ms here instead.
+8. `node.parts().simulator().pause()` stops the on-sale, and `node.parts().store().snapshot()` takes the store's seat map together with its position. From now on nothing changes. The comment says why that is certain: `pause()` waits for a tick that is already running to finish, so no change can be published after the snapshot.
 9. The third wait: every client's sequence is at least the snapshot's. The clients are caught up with a store that no longer moves.
 10. `fleet.stop()` stops the clients and waits for their threads to end.
 11. **The proof.** For each client: `assertThat(client.map().states()).isEqualTo(store.states());` the client's seat map, one letter per seat, is identical to the store's. `assertThat(client.stats().gaps()).isZero();` the client never applied a change after a gap. The test adds up `client.stats().reconnects()`.
 12. `assertThat(reconnects).isGreaterThanOrEqualTo(method == DeliveryMethod.LONG_POLLING ? 0 : 2L * CLIENTS);` every push client lost its stream twice, so at least 20 reconnects. A long-poll client may count none: the comment says a dropped long poll is a GET, which the JDK's HTTP client sends again by itself, so the client never sees the drop. For long polling, the proof is the equality of the maps.
-13. `finally { fleet.stop(); }` stops the fleet even if an assertion failed, so no thread outlives the test. `fleet.stop()` is safe to call twice.
+13. `finally { fleet.stop(); }` stops the fleet even if an assertion failed, so no thread outlives the test. `fleet.stop()` does its work only on the first call, so the second call here returns at once.
 
-The test is deterministic in what it asserts, not in what happens in between: how many changes the clients missed, how long the backoff was and in what order they reconnected differ on every run. The final equality holds under every schedule if the catch-up logic is right. The waits have a 10-second ceiling, and a healthy class run takes about 2.2 seconds for the three methods.
+The test is deterministic in what it asserts, not in what happens in between: how many changes the clients missed, how long the backoff was and in what order they reconnected differ on every run. The final equality holds under every schedule if the catch-up logic is right. The waits have a 10-second ceiling, and a healthy class run takes about 1.9 seconds for the three methods.
 
-**A race in this test.** `pause()` only sets a flag. A tick of the on-sale that has already passed that check can still publish one change after the test took its snapshot. The clients then receive that change, and one client's map has one more held seat than the snapshot. The window is not as small as it looks. In 65 runs of this class in a scratch copy (with other builds running on the machine, load average about 2.5), it failed twice, once for the event-stream method and once for the long-polling method. Both times the maps were 100 characters long and differed in exactly one position, where the store's snapshot had `a` and the client had `h`. Nothing is wrong with the feed here: the snapshot was simply taken one change too early. The same pause-then-snapshot pattern is used in `SlowConsumer.run` in the main code.
+**A race that version 1.1.0 removed.** In version 1.0.0 `pause()` only set a flag. A tick of the on-sale that had already passed that check could still publish one change after the test took its snapshot. The clients then received that change, and one client's map had one more held seat than the snapshot. In 65 runs of this class on a loaded machine, it failed twice, once for the event-stream method and once for the long-polling method, each time with the maps differing in exactly one seat. Nothing was wrong with the feed: the snapshot was taken one change too early. The fix is in `OnSaleSimulator` (`java-feed-walkthrough.md`), where both this test and `SlowConsumer.run` get it, and `OnSaleSimulatorTest` proves it by forcing the interleaving (`tests-feed-walkthrough.md`).
 
 ## Try it yourself
 
@@ -1294,7 +1664,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 ./gradlew --offline cleanTest test --tests 'io.plainround.seatwave.live.http.*' --tests 'io.plainround.seatwave.live.websocket.*' --tests 'io.plainround.seatwave.live.client.*'
 ```
 
-   Expected: 41 `PASSED` lines (16 + 14 + 11), then `BUILD SUCCESSFUL`. The long poll that waits for its hold takes about 2 seconds.
+   Expected: 48 `PASSED` lines (17 + 17 + 14), then `BUILD SUCCESSFUL`. The long poll that waits for its hold takes about 2 seconds.
 
 2. Speak WebSocket by hand. Start the node (`./gradlew -q serve --args='config/serve.properties'`), read a position with `curl -s http://127.0.0.1:8090/v1/events/1/seat-map`, and use the `curl` command from the README, which sends the RFC key and gets a `101 Switching Protocols` reply with `Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`. This is the same exchange as `HandshakeTest` and `WebSocketServerTest`.
 
@@ -1306,7 +1676,7 @@ All commands ran in a scratch copy of this repository on 11 November 2026. Timin
 
    Expected: three `PASSED` lines, one per method, `ReconnectCorrectnessTest > endsWithTheStoresSeatMapAfterEveryConnectionIsDroppedTwice(DeliveryMethod) > [1] LONG_POLLING PASSED` and the same for `[2] SERVER_SENT_EVENTS` and `[3] WEBSOCKET`.
 
-4. Break the catch-up on purpose, in a scratch copy only. In `SeatFeed.subscribe` (main code) replace the line `subscriber.addAll(changes.changes());` by a comment and run `./gradlew --offline test --tests '*ReconnectCorrectnessTest' --tests '*SeatFeedTest'`. I ran this: `[2] SERVER_SENT_EVENTS` and `[3] WEBSOCKET` of the reconnect test failed at `ReconnectCorrectnessTest.java:43` (`expected: 0L but was: 2L`: the clients counted two gaps, because after a reconnect the next live change did not follow the last one they had), `[1] LONG_POLLING` still passed (it does not use `subscribe`), and `SeatFeedTest.givesASubscriberEveryChangeExactlyOnceWhileChangesArePublishedAsItJoins` failed at line 45. Put the line back afterwards.
+4. Break the catch-up on purpose, in a scratch copy only. In `SeatFeed.subscribe` (main code) replace the line `subscriber.addAll(changes.changes());` by a comment and run `./gradlew --offline test --tests '*ReconnectCorrectnessTest' --tests '*SeatFeedTest'`. I ran this: `[2] SERVER_SENT_EVENTS` and `[3] WEBSOCKET` of the reconnect test failed at `ReconnectCorrectnessTest.java:51` (`expected: 0L but was: 2L`: the clients counted two gaps, because after a reconnect the next live change did not follow the last one they had), `[1] LONG_POLLING` still passed (it does not use `subscribe`), and `SeatFeedTest.givesASubscriberEveryChangeExactlyOnceWhileChangesArePublishedAsItJoins` failed at line 47. (I ran this again with version 1.1.0.) Put the line back afterwards.
 
 ## Mistakes people make
 

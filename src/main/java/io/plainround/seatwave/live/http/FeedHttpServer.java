@@ -42,7 +42,10 @@ public final class FeedHttpServer implements AutoCloseable {
   private static final Map<String, String> PAGES =
       Map.of(
           "/", "web/live-seat-map.html",
+          "/live-seat-map.css", "web/live-seat-map.css",
           "/live-seat-map.js", "web/live-seat-map.js");
+  // The page names the WebSocket origin with this mark; the server writes the real one in.
+  private static final String WEBSOCKET_ORIGIN_MARK = "@websocket-origin@";
 
   private final HttpServer server;
   private final ExecutorService workers;
@@ -51,6 +54,7 @@ public final class FeedHttpServer implements AutoCloseable {
   private final LongPollRoute longPoll;
   private final EventStreamRoute eventStream;
   private final boolean adminEnabled;
+  private final String webSocketOrigin;
   private final String contentSecurityPolicy;
 
   private FeedHttpServer(HttpServer server, Parts parts, LiveSettings settings, int webSocketPort) {
@@ -65,9 +69,10 @@ public final class FeedHttpServer implements AutoCloseable {
         new EventStreamRoute(
             parts, replies, settings.timing().heartbeat(), settings.timing().retry());
     this.adminEnabled = settings.adminEnabled();
-    // The page may load only its own script and talk only to this feed and its WebSocket port.
-    this.contentSecurityPolicy =
-        "default-src 'self'; connect-src 'self' ws://127.0.0.1:" + webSocketPort;
+    this.webSocketOrigin = "ws://127.0.0.1:" + webSocketPort;
+    // The page may load only its own files (no inline style or script) and talk only to this feed
+    // and the one WebSocket origin it is told about.
+    this.contentSecurityPolicy = "default-src 'self'; connect-src 'self' " + webSocketOrigin;
   }
 
   /**
@@ -175,8 +180,19 @@ public final class FeedHttpServer implements AutoCloseable {
       body = Objects.requireNonNull(in, resource).readAllBytes();
     }
     exchange.getResponseHeaders().set("Content-Security-Policy", contentSecurityPolicy);
-    String type =
-        resource.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8";
+    String type;
+    if (resource.endsWith(".js")) {
+      type = "text/javascript; charset=utf-8";
+    } else if (resource.endsWith(".css")) {
+      type = "text/css; charset=utf-8";
+    } else {
+      type = "text/html; charset=utf-8";
+      // The page learns the WebSocket port from the server, so it is right for any setting.
+      body =
+          new String(body, StandardCharsets.UTF_8)
+              .replace(WEBSOCKET_ORIGIN_MARK, webSocketOrigin)
+              .getBytes(StandardCharsets.UTF_8);
+    }
     replies.text(exchange, type, body);
   }
 

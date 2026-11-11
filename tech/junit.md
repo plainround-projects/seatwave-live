@@ -8,7 +8,7 @@ An **annotation** is a label written with `@` in front of a method, class or par
 
 ## Why this repository uses it
 
-The project's tests double as its requirements: every test method has a long name that states one behavior in plain words, and all 93 results run with `./gradlew check`. JUnit gives the structure. AssertJ (`assertj.md`) gives the readable checks and Awaitility (`awaitility.md`) the waiting. This module is about delivery to many clients, so many tests start a real feed node on the loopback address and talk to it with real HTTP and WebSocket clients, or race 50 virtual threads for one seat; JUnit only has to start the test and notice whether it returned or threw.
+The project's tests double as its requirements: every test method has a long name that states one behavior in plain words, and all 103 results run with `./gradlew check`. JUnit gives the structure. AssertJ (`assertj.md`) gives the readable checks and Awaitility (`awaitility.md`) the waiting. This module is about delivery to many clients, so many tests start a real feed node on the loopback address and talk to it with real HTTP and WebSocket clients, or race 50 virtual threads for one seat; JUnit only has to start the test and notice whether it returned or threw.
 
 ## Where it appears
 
@@ -17,7 +17,7 @@ The project's tests double as its requirements: every test method has a long nam
 | `gradle/libs.versions.toml` | `junit = "6.1.3"` and the entries `junit-bom`, `junit-jupiter` and `junit-platform-launcher`. |
 | `build.gradle.kts` | `platform(libs.junit.bom)`, `libs.junit.jupiter` and `libs.junit.platform.launcher`, and `useJUnitPlatform()`. |
 | `gradle.lockfile` | Locks the JUnit libraries at 6.1.3 (`dependency-locking.md`). |
-| `src/test/java/**` | 18 test classes with 80 `@Test` methods and 2 `@ParameterizedTest` methods (together 93 results), and 3 helper classes that hold no tests (`MutableClock`, `Raw`, `TestSettings`). |
+| `src/test/java/**` | 20 test classes with 90 `@Test` methods and 2 `@ParameterizedTest` methods (together 103 results), and 3 helper classes that hold no tests (`MutableClock`, `Raw`, `TestSettings`). |
 | `src/test/resources/junit-platform.properties` | One JUnit setting: a 60-second default timeout for every test (`tests-other-packages-walkthrough.md`). |
 
 ## How it works underneath
@@ -26,7 +26,7 @@ The project's tests double as its requirements: every test method has a long nam
 2. The Platform asks the **Jupiter engine** (`junit-jupiter-engine`) to **discover** tests: it scans the classes under `build/classes/java/test` for methods marked `@Test` or `@ParameterizedTest`.
 3. For **each** test method Jupiter creates a **new instance** of the test class, runs the methods marked `@BeforeEach`, then the test method, then the methods marked `@AfterEach`, and throws the instance away. State cannot leak from one test to the next through an ordinary field.
 4. A test **passes** if the method returns normally. It **fails** if it throws an `AssertionError`, which is what a wrong check throws. It is an **error** if it throws anything else.
-5. Results go to `build/test-results/test/*.xml` (one file per class, 18 here), and Gradle prints one line per result because of `testLogging { events("passed", "failed", "skipped") }`.
+5. Results go to `build/test-results/test/*.xml` (one file per class, 20 here), and Gradle prints one line per result because of `testLogging { events("passed", "failed", "skipped") }`.
 6. The test classes and methods are **package-private** (no `public`). JUnit 5 and 6 allow that, which keeps tests out of the public surface. The three helper classes are `public` on purpose, because tests in several packages use them.
 
 JUnit does not promise an order between tests, and no test here depends on one. By default JUnit runs the tests one after the other on one thread, and Gradle uses one test JVM, so two tests never overlap in time. Each test that needs a node starts its own on port 0, which lets the system pick a free port, so the tests would not share a socket even if they did overlap.
@@ -163,7 +163,7 @@ A file with exactly this name on the test classpath is read by the JUnit Platfor
 
 ### What this repository does not use
 
-There is no `@BeforeAll`, `@AfterAll`, `@Nested`, `@DisplayName`, `@Timeout`, `@Disabled` or `@ExtendWith`. The timeout is the global one above, not per test. No test is skipped: every run prints 93 `PASSED` lines and no `SKIPPED`.
+There is no `@BeforeAll`, `@AfterAll`, `@Nested`, `@DisplayName`, `@Timeout`, `@Disabled` or `@ExtendWith`. The timeout is the global one above, not per test. No test is skipped: every run prints 103 `PASSED` lines and no `SKIPPED`.
 
 ### Static imports and the assertion style
 
@@ -187,7 +187,7 @@ All ran in a scratch copy on 11 November 2026. Timings differ on every run.
 ./gradlew --offline cleanTest test | grep -c PASSED
 ```
 
-   Output: `93`. (`cleanTest` forces the tests to run again instead of being skipped as up to date.)
+   Output: `103`. (`cleanTest` forces the tests to run again instead of being skipped as up to date.)
 
 2. Run one class:
 
@@ -211,7 +211,7 @@ All ran in a scratch copy on 11 November 2026. Timings differ on every run.
 grep -rhoE "^ *@[A-Za-z]+" src/test | sed 's/^ *//' | sort | uniq -c
 ```
 
-   Output: `1 @AfterEach`, `2 @BeforeEach`, `1 @EnumSource`, `7 @Override`, `2 @ParameterizedTest`, `2 @TempDir`, `80 @Test` and `1 @ValueSource`. (Together: 80 plain tests, 10 results from `@ValueSource` and 3 from `@EnumSource` make 93.)
+   Output: `1 @AfterEach`, `2 @BeforeEach`, `1 @EnumSource`, `15 @Override`, `2 @ParameterizedTest`, `2 @TempDir`, `90 @Test` and `1 @ValueSource`. (Together: 90 plain tests, 10 results from `@ValueSource` and 3 from `@EnumSource` make 103.)
 
 5. Read the totals from the result files:
 
@@ -219,7 +219,7 @@ grep -rhoE "^ *@[A-Za-z]+" src/test | sed 's/^ *//' | sort | uniq -c
 grep -o 'tests="[0-9]*"' build/test-results/test/*.xml
 ```
 
-   Each of the 18 files has a `tests="..."` count after a full run: 3 (`BenchReportsTest`), 5 (`MeasuringToolsTest`), 4 (`BackoffTest`), 4 (`ClientSeatMapTest`), 3 (`ReconnectCorrectnessTest`), 3 (`LiveSettingsTest`), 2 (`ConnectionLimitTest`), 13 (`FeedPositionTest`), 3 (`OnSaleSimulatorTest`), 6 (`ReplayBufferTest`), 6 (`SeatFeedTest`), 4 (`SeatLayoutTest`), 7 (`SeatStoreTest`), 5 (`EventStreamRouteTest`), 11 (`FeedHttpServerTest`), 4 (`FrameCodecTest`), 4 (`HandshakeTest`) and 6 (`WebSocketServerTest`). They add up to 93.
+   Each of the 20 files has a `tests="..."` count after a full run: 3 (`BenchReportsTest`), 5 (`MeasuringToolsTest`), 4 (`BackoffTest`), 4 (`ClientSeatMapTest`), 2 (`EventStreamConnectionTest`), 1 (`FeedClientTest`), 3 (`ReconnectCorrectnessTest`), 4 (`LiveSettingsTest`), 2 (`ConnectionLimitTest`), 13 (`FeedPositionTest`), 4 (`OnSaleSimulatorTest`), 6 (`ReplayBufferTest`), 7 (`SeatFeedTest`), 4 (`SeatLayoutTest`), 7 (`SeatStoreTest`), 5 (`EventStreamRouteTest`), 12 (`FeedHttpServerTest`), 5 (`FrameCodecTest`), 4 (`HandshakeTest`) and 8 (`WebSocketServerTest`). They add up to 103.
 
 ## Mistakes people make
 
@@ -238,7 +238,7 @@ grep -o 'tests="[0-9]*"' build/test-results/test/*.xml
 2. *Why does JUnit create a new instance of the class for every test?* So no test can see state left by another. It is why each test here gets a new limit, a new clock or a new node.
 3. *What does `@TempDir` do?* JUnit makes a new empty folder for the test, stores it in the field or parameter, and deletes it afterwards.
 4. *When does an `@AfterEach` method run?* After every test method, also after a failed one.
-5. *How do 80 plain tests and 2 parameterized methods give 93 results?* The 2 parameterized methods run 10 times (`@ValueSource`) and 3 times (`@EnumSource`): 80 + 10 + 3 = 93.
+5. *How do 90 plain tests and 2 parameterized methods give 103 results?* The 2 parameterized methods run 10 times (`@ValueSource`) and 3 times (`@EnumSource`): 90 + 10 + 3 = 103.
 
 ## Further reading
 

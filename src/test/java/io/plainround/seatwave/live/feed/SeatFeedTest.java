@@ -33,10 +33,13 @@ class SeatFeedTest {
             });
     List<Long> seen = new ArrayList<>();
     for (int joiner = 0; joiner < 20; joiner++) {
-      FeedPosition known = feed.position();
-      Subscriber subscriber =
-          feed.subscribe(new FeedPosition(feed.streamId(), Math.max(0, known.sequence() - 3)));
-      seen.add(drainUntil(subscriber, known.sequence() + 1));
+      FeedPosition joinedAt =
+          new FeedPosition(feed.streamId(), Math.max(0, feed.position().sequence() - 3));
+      Subscriber subscriber = feed.subscribe(joinedAt);
+      // The target is a change that exists or is still coming, whichever side finishes first: one
+      // past the join point, but never past the publisher's last hold.
+      long target = Math.min(joinedAt.sequence() + 1, holds);
+      seen.add(drainUntil(subscriber, joinedAt.sequence() + 1, target));
     }
     publisher.join();
     Subscriber last = feed.subscribe(new FeedPosition(feed.streamId(), 0));
@@ -95,7 +98,8 @@ class SeatFeedTest {
     assertThat(((Catchup.Changes) empty).changes()).isEmpty();
     assertThat(((Catchup.Changes) waiting.get(LONG.toMillis(), TimeUnit.MILLISECONDS)).changes())
         .hasSize(1);
-    assertThat(((Catchup.Changes) feed.changesAfter(start)).changes()).hasSize(1);
+    assertThat(((Catchup.Changes) feed.awaitChangesAfter(start, Duration.ZERO)).changes())
+        .hasSize(1);
   }
 
   @Test
@@ -124,21 +128,37 @@ class SeatFeedTest {
               }
             });
     stuck.beginWrite(blocked);
-    Thread.sleep(SHORT.multipliedBy(2));
+    long stuckSinceNanos = System.nanoTime();
+    // The second write starts strictly later than the first, however fast or slow the machine is.
+    while (System.nanoTime() == stuckSinceNanos) {
+      Thread.onSpinWait();
+    }
     writing.beginWrite(Thread.currentThread());
 
-    int interrupted = feed.disconnectStuckWriters(SHORT);
+    // Checked at the moment the first write reaches the timeout: the first has lasted at least the
+    // timeout, the second strictly less, whatever time really passed in between.
+    int interrupted = feed.disconnectStuckWriters(SHORT, stuckSinceNanos + SHORT.toNanos());
     blocked.join(LONG);
 
     assertThat(interrupted).isEqualTo(1);
     assertThat(blocked.isAlive()).isFalse();
+    assertThat(Thread.interrupted()).isFalse();
     writing.endWrite();
     assertThat(metrics.render()).contains("seatwave_feed_stuck_writer_disconnects_total 1");
   }
 
-  // Takes changes until the given sequence has arrived; returns 1 if every sequence came once.
-  private static long drainUntil(Subscriber subscriber, long target) throws InterruptedException {
-    long expected = -1;
+  @Test
+  void endsEveryMetricsLineWithALineFeedOnEveryPlatform() {
+    String text = metrics.render();
+
+    assertThat(text).doesNotContain("\r").endsWith("\n");
+  }
+
+  // Takes changes until the target sequence has arrived; returns 1 if they started at the first
+  // sequence after the join point and every sequence came once, in order.
+  private static long drainUntil(Subscriber subscriber, long first, long target)
+      throws InterruptedException {
+    long expected = first;
     while (true) {
       Delivery delivery = subscriber.next(LONG);
       if (!(delivery instanceof Delivery.Batch batch)) {
@@ -146,7 +166,7 @@ class SeatFeedTest {
       }
       for (SeatChange change : batch.changes()) {
         long sequence = change.position().sequence();
-        if (expected != -1 && sequence != expected) {
+        if (sequence != expected) {
           return 0;
         }
         expected = sequence + 1;

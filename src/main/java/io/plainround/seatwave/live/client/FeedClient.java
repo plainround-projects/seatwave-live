@@ -32,6 +32,7 @@ public final class FeedClient implements Runnable {
   private final ClientStats stats;
   private final Sink sink = new Sink();
   private int failures;
+  private boolean needsMap = true;
   private long disconnectedAtNanos;
   private volatile long lastHeardNanos;
   private volatile boolean following;
@@ -63,7 +64,7 @@ public final class FeedClient implements Runnable {
   public void run() {
     try {
       while (!Thread.currentThread().isInterrupted()) {
-        if (!map.isLoaded() && !loadMap()) {
+        if (needsMap && !loadMap()) {
           continue;
         }
         Ending ending;
@@ -75,9 +76,9 @@ public final class FeedClient implements Runnable {
         switch (ending) {
           case RELOAD -> {
             stats.recordReload();
-            if (!loadMap()) {
-              continue;
-            }
+            // The map is stale until a reload succeeds: a failed reload is tried again, never
+            // followed from the old position.
+            needsMap = true;
           }
           case DISCONNECTED -> {
             if (disconnectedAtNanos == 0) {
@@ -132,6 +133,7 @@ public final class FeedClient implements Runnable {
       return false;
     }
     map.load(snapshot.get());
+    needsMap = false;
     return true;
   }
 

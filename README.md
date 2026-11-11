@@ -43,16 +43,16 @@ No WebSocket library is used. The JDK has a WebSocket client (`java.net.http.Web
 ./gradlew clean check
 ```
 
-Formats are checked, the code compiles with every warning as an error, 93 tests run and the coverage floor is checked. The last lines of a run on the verification machine:
+Formats are checked, the code compiles with every warning as an error, 103 tests run and the coverage floor is checked. The last lines of a run on the verification machine:
 
 ```text
 
-BUILD SUCCESSFUL in 26s
+BUILD SUCCESSFUL in 30s
 10 actionable tasks: 10 executed
 Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.9.1/userguide/configuration_cache_enabling.html
 ```
 
-Coverage was 90.3 percent of lines (2,266 of 2,509).
+Coverage was 90.8 percent of lines (2,315 of 2,550).
 
 ## The feed and a session
 
@@ -131,7 +131,7 @@ seatwave_feed_connections_total{method="websocket"} 1
 seatwave_feed_reloads_sent_total{method="websocket"} 0
 ```
 
-The browser page is at `http://127.0.0.1:8090/` while `serve` runs. It was **[not run]** on the verification machine: no browser was driven there. Open it by hand to watch section A change, and switch between server-sent events and WebSocket.
+The browser page is at `http://127.0.0.1:8090/` while `serve` runs: it draws section A and follows the feed with server-sent events or a WebSocket, and a select switches between them. It was run on the verification machine in a browser pane after the version 1.1.0 fixes. On the default ports it drew all 1,000 seats in color with no error in the browser's console, followed the feed with both methods, and after six switches made as fast as a script can, `/metrics` showed exactly one open connection. On a copy of `config/serve.properties` with ports 8190 and 8191 and the admin routes on (to drop every connection) the page connected its WebSocket to 8191, the port the server named in the page, and after a drop of every connection and a switch to server-sent events, no second WebSocket was opened.
 
 ## The comparison at 1,000 clients
 
@@ -183,14 +183,14 @@ websocket                    0.0              113.9            113.9
 ```text
 Java 25.0.2+10-LTS on Mac OS X aarch64, 12 processors; this process may open 1048576 files
 settings: client queue 256 changes, write timeout 2000 ms, on-sale 500 actions per second for 10 s
-changes published: 6298
+changes published: 6300
 deepest client queue: 256 (bound 256)
 queue overflows (client told to reload): 2
 stuck writes cut after the write timeout: 2
 open connections at the end: sse 50, websocket 0 (the 50 normal clients are sse)
-slow clients' own sockets still open on their side: yes
-heap after a collection: 57273 KB before, 59653 KB after
-normal clients: delay p50 0.55 ms, p99 2.06 ms, max 27.93 ms (314900 samples); 50 of 50 match the store
+slow clients' connections ended by the server (each read to its end): yes
+heap after a collection: 56907 KB before, 59476 KB after
+normal clients: delay p50 0.65 ms, p99 7.78 ms, max 36.39 ms (315000 samples); 50 of 50 match the store
 ```
 
 ```text
@@ -231,18 +231,14 @@ seatwave-live/
   src/main/java/io/plainround/seatwave/live/
     LiveFeedNode, ServeCli
     config/ feed/ wire/ http/ websocket/ client/ bench/
-  src/main/resources/web/     the browser page and its script
+  src/main/resources/web/     the browser page, its style and its script
   src/test/java/io/plainround/seatwave/live/   the tests
   build.gradle.kts, settings.gradle.kts, gradle/libs.versions.toml, gradle.lockfile
 ```
 
 ## Technology notes
 
-A `tech/` folder of beginner notes on every technology used here is added in a separate step, after the code is final.
-
-## Technology notes
-
-The `tech/` folder explains every technology this repository uses, from zero: Java, concurrency in the feed, the three real-time protocols, measuring a server, Gradle and its wrapper scripts, the version catalog, dependency locking, the formatter, the coverage tool, the secret scanner, the test libraries, the web page and logging, properties files, Docker Compose, EditorConfig and Git. Eight more files walk through the main code and the tests line by line. Start at `tech/README.md`, which gives a reading order.
+The `tech/` folder explains every technology this repository uses, from zero: Java, concurrency in the feed, the three real-time protocols, measuring a server, JSON and Jackson, Gradle and its wrapper scripts, the version catalog, dependency locking, the formatter, the coverage tool, the secret scanner, the test libraries, the web page and logging, properties files, Docker Compose, EditorConfig and Git. Eight more files walk through the main code and the tests line by line. Start at `tech/README.md`, which gives a reading order.
 
 ## What is simplified for teaching
 
@@ -251,6 +247,7 @@ The `tech/` folder explains every technology this repository uses, from zero: Ja
 - No authentication on the feed: seat availability is public in Module 7's API too. Authenticating long-lived connections is discussed in the module and built in Module 38.
 - The WebSocket server is the course's own, for teaching; production would use a maintained server.
 - The load clients run on the same machine as the server, so their CPU competes with the server's and the delays include no network distance.
+- A long poll whose client has gone away is noticed only when its reply is written, up to one hold later (25 seconds with `config/serve.properties`): the JDK's HTTP server gives a handler no signal that the connection closed. Until then the request keeps its virtual thread and its place under the connection limit. The hold is bounded, so the place is always freed; a production server would watch held connections for a close.
 
 ## Continuous integration
 

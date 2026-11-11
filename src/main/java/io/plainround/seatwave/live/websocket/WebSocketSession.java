@@ -165,6 +165,8 @@ final class WebSocketSession {
             return;
           }
           default ->
+              // The codec has already refused unknown opcodes with 1002, so only a text or a
+              // binary message reaches this branch: data the feed does not accept, 1003.
               throw new ProtocolViolation(
                   CloseCode.UNSUPPORTED_DATA, "the feed accepts no messages");
         }

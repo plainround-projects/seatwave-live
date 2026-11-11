@@ -70,7 +70,7 @@ the queue's bound). Its writer, stuck in a socket write, is found by the stuck-w
 - **The WebSocket server is written on the JDK, against RFC 6455.** The JDK has a WebSocket client
   (`java.net.http.WebSocket`) but no server, and its HTTP server cannot hand a connection over
   after `101 Switching Protocols`. The project writes the handshake, the framing and the close and
-  heartbeat rules itself (eight files, about 840 lines with their comments), because the module teaches exactly those
+  heartbeat rules itself (eleven files, about 860 lines with their comments), because the module teaches exactly those
   things and because the per-connection bounds must be the feed's own. Rejected:
   `org.java-websocket:Java-WebSocket` 1.6.0 (MIT, OSV lists nothing on 11 November 2026, but its
   last release was on 15 December 2024 and its per-connection send queue has no bound) and Jetty
@@ -105,4 +105,5 @@ the queue's bound). Its writer, stuck in a socket write, is found by the stuck-w
 | A seat has at most one holder; an expired hold cannot be confirmed | `SeatStore` under its lock | `SeatStoreTest` |
 | A slow client's memory is bounded | `Subscriber.offer` (capacity, then reload), the stuck-writer check | `SeatFeedTest`, `MeasuringToolsTest` |
 | Open connections are bounded | `ConnectionLimit.admit` before any subscription | `ConnectionLimitTest`, `FeedHttpServerTest`, `WebSocketServerTest` |
-| Only the allowed origin opens a WebSocket; client frames are masked | `Handshake.read`, `FrameCodec.read` | `HandshakeTest`, `FrameCodecTest`, `WebSocketServerTest` |
+| Only the allowed origin opens a WebSocket; client frames are masked and of a defined opcode | `Handshake.read`, `FrameCodec.read` | `HandshakeTest`, `FrameCodecTest`, `WebSocketServerTest` |
+| A paused on-sale changes nothing after `pause()` returns, so a snapshot taken then is final | `OnSaleSimulator.pause` and `tick` under one lock | `OnSaleSimulatorTest`, `ReconnectCorrectnessTest` |
